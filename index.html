@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1115">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <title>Crypto Hourly Desk</title>
+</head>
+<body>
+  <main>
+    <header class="topbar">
+      <div><p class="eyebrow">KRaken public spot research</p><h1>Hourly Desk</h1></div>
+      <span class="pill">READ-ONLY</span>
+    </header>
+    <section class="notice"><strong>Manual review only</strong><span>No orders, credentials, margin, or short execution.</span></section>
+    <section class="panel search-panel">
+      <label for="coin-search">Search a coin or project</label>
+      <div class="search-row"><input id="coin-search" type="search" placeholder="BTC, ETH, XRP…" autocomplete="off"><button id="search-button" type="button">Search</button></div>
+      <p id="search-status" class="muted">Public Kraken USD spot data only.</p>
+      <div id="search-result" class="result" hidden></div>
+    </section>
+    <section class="section-head"><div><p class="eyebrow">NEXT HOURLY REVIEW</p><h2>Trading opportunities</h2></div><span id="scan-status" class="pill">LOADING</span></section>
+    <p id="scan-summary" class="muted">Loading the latest hourly scan…</p>
+    <section id="opportunities" class="cards"></section>
+    <section class="panel footer-note"><strong>How to use this</strong><p>Review the entry zone, invalidation, and targets. Confirm the market yourself before placing any manual spot trade. A SHORT label is research-only and remains blocked until margin is independently verified.</p></section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
