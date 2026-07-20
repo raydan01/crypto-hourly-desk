@@ -34,11 +34,18 @@ async function analyze(query) {
     return;
   }
   try {
-    const pairs = await fetch(`https://api.kraken.com/0/public/AssetPairs?pair=${encodeURIComponent(symbol)}`).then(r => r.json());
-    const pairKey = Object.keys(pairs.result || {})[0];
+    const pairsResponse = await fetch("https://api.kraken.com/0/public/AssetPairs");
+    const pairs = await pairsResponse.json();
+    const pairEntry = Object.entries(pairs.result || {}).find(([key, value]) => {
+      const wsname = String(value?.wsname || "").toUpperCase();
+      const altname = String(value?.altname || key).toUpperCase();
+      return value?.status === "online" && (wsname === `${symbol}/USD` || altname === `${symbol}USD` || key.toUpperCase() === `${symbol}USD`);
+    });
+    const pairKey = pairEntry?.[0];
     if (!pairKey) throw new Error("No Kraken USD spot pair found");
-    const ticker = await fetch(`https://api.kraken.com/0/public/Ticker?pair=${encodeURIComponent(pairKey)}`).then(r => r.json());
-    const row = ticker.result?.[pairKey]; if (!row) throw new Error("Ticker unavailable");
+    const tickerResponse = await fetch(`https://api.kraken.com/0/public/Ticker?pair=${encodeURIComponent(pairKey)}`);
+    const ticker = await tickerResponse.json();
+    const row = ticker.result?.[pairKey] || Object.values(ticker.result || {})[0]; if (!row) throw new Error("Ticker unavailable");
     const last = Number(row.c?.[0]); const opening = Number(row.o); const change = opening ? ((last / opening) - 1) * 100 : null;
     result.innerHTML = `<h3>${escapeHtml(symbol)} · ${change == null ? "NEUTRAL" : change >= 1 ? "LONG RESEARCH" : change <= -1 ? "BEARISH WATCH" : "NEUTRAL"}</h3><p class="muted">${price(last)} USD · 24h change ${change == null ? "n/a" : change.toFixed(2) + "%"}</p><p class="muted">Research only. Verify the market yourself; no order path exists.</p>`;
     $("#search-status").textContent = "Public ticker returned.";
