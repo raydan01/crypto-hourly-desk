@@ -13,11 +13,14 @@ function card(item) {
 }
 
 function render() {
-  const choices = (snapshot.opportunities || []).slice(0, 6);
+  const choices = (snapshot.candidates || []).slice(0, 20);
+  const setupCount = (snapshot.opportunities || []).length;
   const avoids = (snapshot.avoids || []).filter(item => item.bias === "AVOID").slice(0, 2);
   const bearish = (snapshot.candidates || []).filter(item => item.bias === "SHORT_RESEARCH").length;
   $("#scan-status").textContent = snapshot.status === "READY" ? "FRESH HOURLY" : String(snapshot.status || "NOT READY").replaceAll("_", " ");
-  $("#scan-summary").textContent = `${choices.length} setup${choices.length === 1 ? "" : "s"} cleared the latest Kraken quality screen · captured ${new Date(snapshot.generated_at_utc).toLocaleString()} · ${avoids.length} shown as avoid.`;
+  const counts = snapshot.selection_counts || {};
+  const selection = counts.watchlist_selected != null ? ` · ${counts.watchlist_selected} watched + ${counts.discovery_selected} discovery` : "";
+  $("#scan-summary").textContent = `${choices.length} markets shown · ${setupCount} setup${setupCount === 1 ? "" : "s"} cleared the latest Kraken quality screen${selection} · captured ${new Date(snapshot.generated_at_utc).toLocaleString()} · AVOID cards are watch-only.`;
   $("#opportunities").innerHTML = choices.length ? choices.map(card).join("") : `<div class="panel"><strong>No directional setup cleared this hour.</strong><p class="muted">${bearish} SHORT research candidate${bearish === 1 ? " was" : "s were"} found in the latest scan. Research labels remain non-executable until independently verified.</p></div>`;
 }
 

@@ -15,6 +15,9 @@ def test_mobile_package_has_installable_shell_and_hourly_snapshot():
     assert payload["cadence"] == "hourly"
     assert payload["execution_allowed"] is False
     assert payload["trade_authorization"] is False
+    assert payload["selection_counts"]["watchlist_requested"] == 16
+    assert payload["selection_counts"]["discovery_requested"] == 4
+    assert len(payload["candidates"]) <= 20
 
 
 def test_mobile_package_contains_no_private_dashboard_assets():
@@ -30,3 +33,4 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     assert 'addEventListener("click", boot)' in app
     assert "SHORT research candidate" in app
     assert "non-executable" in app
+    assert "const choices = (snapshot.candidates || []).slice(0, 20)" in app

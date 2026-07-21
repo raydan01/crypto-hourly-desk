@@ -13,7 +13,9 @@ from research.market_scanner import scan_markets
 
 ROOT = Path(__file__).parent
 OUTPUT = ROOT / "data" / "market-opportunities-hourly-latest.json"
+WATCHLIST = ROOT / "data" / "watchlist.json"
 API = "https://api.kraken.com/0/public"
+NON_CRYPTO_SYMBOLS = {"USD", "GBP", "EUR", "CAD", "AUD", "JPY", "CHF"}
 
 
 def request_json(endpoint: str, params: dict[str, str] | None = None) -> dict:
@@ -76,7 +78,24 @@ def build_snapshot() -> dict:
         candidate["margin_status"] = source.get("margin_status", "unknown")
         candidate["metrics"]["change_24h_pct"] = source.get("change_24h_pct")
         candidate["pair_key"] = source.get("pair_key")
-    return build_opportunity_payload(scan, generated_at_utc=captured, cadence="hourly")
+    watchlist = json.loads(WATCHLIST.read_text(encoding="utf-8"))
+    watched_symbols = {str(item.get("symbol", "")).upper() for item in watchlist.get("assets", []) if item.get("category") == "crypto"}
+    watched = [item for item in scan["candidates"] if item["symbol"] in watched_symbols]
+    discovery = [item for item in scan["candidates"] if item["symbol"] not in watched_symbols and item["symbol"] not in NON_CRYPTO_SYMBOLS]
+    selected_watched = watched[:16]
+    selected_discovery = discovery[:4]
+    if len(selected_watched) < 16:
+        selected_discovery = discovery[: 20 - len(selected_watched)]
+    for item in selected_watched:
+        item["universe_bucket"] = "WATCHLIST"
+    for item in selected_discovery:
+        item["universe_bucket"] = "DISCOVERY"
+    selected = selected_watched + selected_discovery
+    focused_scan = {**scan, "candidates": selected}
+    payload = build_opportunity_payload(focused_scan, generated_at_utc=captured, cadence="hourly")
+    payload["selection_policy"] = "16 highest-ranked watched coins plus 4 highest-ranked non-watchlist coins; quality filters may reduce the watched count"
+    payload["selection_counts"] = {"watchlist_requested": 16, "watchlist_selected": len(selected_watched), "discovery_requested": 4, "discovery_selected": len(selected_discovery)}
+    return payload
 
 
 if __name__ == "__main__":

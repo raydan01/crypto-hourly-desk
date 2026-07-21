@@ -1,0 +1,8 @@
+{
+  "source": "Kraken favorites supplied by Ray",
+  "policy": "research_universe_only",
+  "trade_authorization": false,
+  "assets": [
+    {"symbol":"ADA","category":"crypto"},{"symbol":"AERO","category":"crypto"},{"symbol":"AIOZ","category":"crypto"},{"symbol":"ALGO","category":"crypto"},{"symbol":"APT","category":"crypto"},{"symbol":"ASTER","category":"crypto"},{"symbol":"AVAX","category":"crypto"},{"symbol":"BTC","category":"crypto"},{"symbol":"DASH","category":"crypto"},{"symbol":"ETH","category":"crypto"},{"symbol":"FARTCOIN","category":"crypto"},{"symbol":"FLR","category":"crypto"},{"symbol":"HBAR","category":"crypto"},{"symbol":"ICP","category":"crypto"},{"symbol":"KAS","category":"crypto"},{"symbol":"LINK","category":"crypto"},{"symbol":"MSOL","category":"crypto"},{"symbol":"NEAR","category":"crypto"},{"symbol":"ONDO","category":"crypto"},{"symbol":"PENGU","category":"crypto"},{"symbol":"PEPE","category":"crypto"},{"symbol":"PUMP","category":"crypto"},{"symbol":"SOL","category":"crypto"},{"symbol":"SUI","category":"crypto"},{"symbol":"TAO","category":"crypto"},{"symbol":"TRUMP","category":"crypto"},{"symbol":"TOSHI","category":"crypto"},{"symbol":"TRX","category":"crypto"},{"symbol":"UNI","category":"crypto"},{"symbol":"VVV","category":"crypto"},{"symbol":"WLD","category":"crypto"},{"symbol":"WLFI","category":"crypto"},{"symbol":"XLM","category":"crypto"},{"symbol":"XMN","category":"crypto"},{"symbol":"XRP","category":"crypto"},{"symbol":"ZEC","category":"crypto"}
+  ]
+}
