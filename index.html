@@ -15,7 +15,7 @@
   <main>
     <header class="topbar">
       <div><p class="eyebrow">Kraken public spot research</p><h1>Hourly Desk</h1></div>
-      <div class="top-actions"><button id="refresh-button" type="button">Refresh scan</button><span class="pill">READ-ONLY</span></div>
+      <span class="pill">READ-ONLY</span>
     </header>
     <section class="notice"><strong>Manual review only</strong><span>No orders, credentials, margin, or short execution.</span></section>
     <section class="panel search-panel">
@@ -26,6 +26,7 @@
     </section>
     <section class="section-head"><div><p class="eyebrow">NEXT HOURLY REVIEW</p><h2>Trading opportunities</h2></div><span id="scan-status" class="pill">LOADING</span></section>
     <p id="scan-summary" class="muted">Loading the latest hourly scan…</p>
+    <div class="scan-actions"><button id="refresh-button" type="button">Refresh hourly scan</button></div>
     <section id="opportunities" class="cards"></section>
     <section class="panel footer-note"><strong>How to use this</strong><p>Review the entry zone, invalidation, and targets. Confirm the market yourself before placing any manual spot trade. A SHORT label is research-only and remains blocked until margin is independently verified.</p></section>
   </main>
