@@ -2,14 +2,17 @@ const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? "").replace(/[&<>\"]/g, character => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[character]));
 const price = value => value == null ? "n/a" : Number(value).toLocaleString(undefined, { maximumSignificantDigits: 8 });
 let snapshot = null;
+const biasLabel = {LONG_RESEARCH: "BULLISH SETUP", SHORT_RESEARCH: "BEARISH SETUP", AVOID: "WATCH ONLY"};
+const timeframeLabel = {SHORT_TERM: "INTRADAY", MEDIUM_LONG_TERM: "MEDIUM-TERM"};
 
 function card(item) {
   const metrics = item.metrics || {};
   const map = item.price_map;
-  const bias = String(item.bias || "WATCH").replaceAll("_", " ");
+  const biasKey = String(item.bias || "WATCH");
+  const bias = biasLabel[biasKey] || biasKey.replaceAll("_", " ");
   const tone = bias.includes("LONG") ? "long" : bias.includes("SHORT") ? "short" : "avoid";
   const setup = map ? `<div class="setup"><div><span>Entry zone</span><strong>${price(map.entry_low)} – ${price(map.entry_high)}</strong></div><div><span>Invalidation</span><strong>${price(map.invalidation)}</strong></div><div><span>Target 1</span><strong>${price(map.target_one)}</strong></div><div><span>Target 2</span><strong>${price(map.target_two)}</strong></div></div>` : "";
-  return `<article class="card"><div class="card-top"><span class="symbol">${escapeHtml(item.symbol)}</span><span class="bias ${tone}">${escapeHtml(bias)}</span></div><div class="card-meta">${escapeHtml(item.timeframe || "SHORT TERM")} · margin ${escapeHtml(item.margin_status || "unknown")}</div><p class="reason">${escapeHtml(item.explanation?.quick_reason || item.avoid_reason || "Quality screen result")}</p><div class="metrics"><div class="metric"><span>24h change</span><strong>${metrics.change_24h_pct == null ? "n/a" : Number(metrics.change_24h_pct).toFixed(2) + "%"}</strong></div><div class="metric"><span>Spread</span><strong>${metrics.spread_bps == null ? "n/a" : Number(metrics.spread_bps).toFixed(2) + " bps"}</strong></div></div>${setup}</article>`;
+  return `<article class="card"><div class="card-top"><span class="symbol">${escapeHtml(item.symbol)}</span><span class="bias ${tone}">${escapeHtml(bias)}</span></div><div class="card-meta">${escapeHtml(timeframeLabel[item.timeframe] || item.timeframe || "INTRADAY")} · margin ${escapeHtml(item.margin_status || "unknown")}</div><p class="reason">${escapeHtml(item.explanation?.quick_reason || item.avoid_reason || "Quality screen result")}</p><div class="metrics"><div class="metric"><span>24h change</span><strong>${metrics.change_24h_pct == null ? "n/a" : Number(metrics.change_24h_pct).toFixed(2) + "%"}</strong></div><div class="metric"><span>Spread</span><strong>${metrics.spread_bps == null ? "n/a" : Number(metrics.spread_bps).toFixed(2) + " bps"}</strong></div></div>${setup}</article>`;
 }
 
 function render() {
@@ -20,8 +23,8 @@ function render() {
   $("#scan-status").textContent = snapshot.status === "READY" ? "FRESH HOURLY" : String(snapshot.status || "NOT READY").replaceAll("_", " ");
   const counts = snapshot.selection_counts || {};
   const selection = counts.watchlist_selected != null ? ` · ${counts.watchlist_selected} watched + ${counts.discovery_selected} discovery` : "";
-  $("#scan-summary").textContent = `${choices.length} markets shown · ${setupCount} setup${setupCount === 1 ? "" : "s"} cleared the latest Kraken quality screen${selection} · captured ${new Date(snapshot.generated_at_utc).toLocaleString()} · AVOID cards are watch-only.`;
-  $("#opportunities").innerHTML = choices.length ? choices.map(card).join("") : `<div class="panel"><strong>No directional setup cleared this hour.</strong><p class="muted">${bearish} SHORT research candidate${bearish === 1 ? " was" : "s were"} found in the latest scan. Research labels remain non-executable until independently verified.</p></div>`;
+  $("#scan-summary").textContent = `${choices.length} markets shown · ${setupCount} setup${setupCount === 1 ? "" : "s"} cleared the latest Kraken quality screen${selection} · captured ${new Date(snapshot.generated_at_utc).toLocaleString()} · WATCH ONLY cards are monitoring-only.`;
+  $("#opportunities").innerHTML = choices.length ? choices.map(card).join("") : `<div class="panel"><strong>No directional setup cleared this hour.</strong><p class="muted">${bearish} bearish candidate${bearish === 1 ? " was" : "s were"} found in the latest scan. All labels are monitoring-only until independently verified.</p></div>`;
 }
 
 async function analyze(query) {
@@ -33,7 +36,7 @@ async function analyze(query) {
   if (local) {
     const metrics = local.metrics || {};
     const change = metrics.change_24h_pct == null ? null : Number(metrics.change_24h_pct);
-    result.innerHTML = `<h3>${escapeHtml(symbol)} · ${escapeHtml(String(local.bias || "WATCH").replaceAll("_", " "))}</h3><p class="muted">${price(metrics.last)} USD · 24h change ${change == null ? "n/a" : change.toFixed(2) + "%"}</p><p class="muted">${escapeHtml(local.explanation?.quick_reason || local.avoid_reason || "Quality screen result")}</p><p class="muted">Snapshot search is research-only; no order will be placed.</p>`;
+    result.innerHTML = `<h3>${escapeHtml(symbol)} · ${escapeHtml(biasLabel[String(local.bias || "WATCH")] || String(local.bias || "WATCH"))}</h3><p class="muted">${price(metrics.last)} USD · 24h change ${change == null ? "n/a" : change.toFixed(2) + "%"}</p><p class="muted">${escapeHtml(local.explanation?.quick_reason || local.avoid_reason || "Quality screen result")}</p><p class="muted">Snapshot search is monitoring-only; no order will be placed.</p>`;
     $("#search-status").textContent = "Found in the latest hourly snapshot.";
     return;
   }
@@ -51,7 +54,7 @@ async function analyze(query) {
     const ticker = await tickerResponse.json();
     const row = ticker.result?.[pairKey] || Object.values(ticker.result || {})[0]; if (!row) throw new Error("Ticker unavailable");
     const last = Number(row.c?.[0]); const opening = Number(row.o); const change = opening ? ((last / opening) - 1) * 100 : null;
-    result.innerHTML = `<h3>${escapeHtml(symbol)} · ${change == null ? "NEUTRAL" : change >= 1 ? "LONG RESEARCH" : change <= -1 ? "BEARISH WATCH" : "NEUTRAL"}</h3><p class="muted">${price(last)} USD · 24h change ${change == null ? "n/a" : change.toFixed(2) + "%"}</p><p class="muted">Research only. Verify the market yourself; no order path exists.</p>`;
+    result.innerHTML = `<h3>${escapeHtml(symbol)} · ${change == null ? "NEUTRAL" : change >= 1 ? "BULLISH SETUP" : change <= -1 ? "BEARISH SETUP" : "NEUTRAL"}</h3><p class="muted">${price(last)} USD · 24h change ${change == null ? "n/a" : change.toFixed(2) + "%"}</p><p class="muted">Monitoring only. Verify the market yourself; no order path exists.</p>`;
     $("#search-status").textContent = "Public ticker returned.";
   } catch (error) { result.innerHTML = `<p class="muted">${escapeHtml(error.message)}. Try a Kraken symbol such as BTC or ETH.</p>`; $("#search-status").textContent = "Search unavailable."; }
 }
