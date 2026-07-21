@@ -60,6 +60,8 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     assert "renderSocial" in app
     assert "combined market + social score" in app
     assert "opportunity_score" in app
+    assert "Top shorts" in html
+    assert "activeDirection" in app
     assert "CoinGecko" in html
     assert "OHLC" in app
-    assert "const choices = (snapshot.candidates || []).slice(0, 20)" in app
+    assert "const allChoices = snapshot.candidates || []" in app

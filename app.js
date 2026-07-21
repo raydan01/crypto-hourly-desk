@@ -3,6 +3,7 @@ const escapeHtml = value => String(value ?? "").replace(/[&<>\"]/g, character =>
 const price = value => value == null ? "n/a" : Number(value).toLocaleString(undefined, { maximumSignificantDigits: 8 });
 let snapshot = null;
 let activeMode = "hourly";
+let activeDirection = "all";
 const biasLabel = {LONG_RESEARCH: "BULLISH SETUP", SHORT_RESEARCH: "BEARISH SETUP", AVOID: "WATCH ONLY"};
 const timeframeLabel = {SHORT_TERM: "DAY TRADING", MEDIUM_LONG_TERM: "WEEKLY TRADING", LONG_TERM: "3+ MONTHS"};
 const modeConfig = {hourly: {file: "data/market-opportunities-hourly-latest.json", title: "DAY TRADING", eyebrow: "NEXT HOURLY REVIEW"}, daily: {file: "data/market-opportunities-daily-latest.json", title: "WEEKLY TRADING", eyebrow: "NEXT WEEKLY REVIEW"}};
@@ -18,7 +19,8 @@ function card(item) {
 }
 
 function render() {
-  const choices = (snapshot.candidates || []).slice(0, 20);
+  const allChoices = snapshot.candidates || [];
+  const choices = (activeDirection === "all" ? allChoices : allChoices.filter(item => item.bias === activeDirection)).slice(0, 20);
   const setupCount = (snapshot.opportunities || []).length;
   const avoids = (snapshot.avoids || []).filter(item => item.bias === "AVOID").slice(0, 2);
   const bearish = (snapshot.candidates || []).filter(item => item.bias === "SHORT_RESEARCH").length;
@@ -26,7 +28,8 @@ function render() {
   $("#scan-status").textContent = snapshot.status === "READY" ? `FRESH ${mode.title}` : String(snapshot.status || "NOT READY").replaceAll("_", " ");
   const counts = snapshot.selection_counts || {};
   const selection = counts.watchlist_selected != null ? ` · ${counts.watchlist_selected} watched + ${counts.discovery_selected} discovery` : "";
-  $("#scan-summary").textContent = `${choices.length} markets ranked by combined market + social score · ${setupCount} setup${setupCount === 1 ? "" : "s"} cleared the latest screen${selection} · captured ${new Date(snapshot.generated_at_utc).toLocaleString()} · WATCH ONLY cards are monitoring-only.`;
+  const directionLabel = activeDirection === "all" ? "all directions" : activeDirection === "LONG_RESEARCH" ? "long opportunities" : activeDirection === "SHORT_RESEARCH" ? "short opportunities" : "avoid/watch markets";
+  $("#scan-summary").textContent = `${choices.length} ${directionLabel} ranked by combined market + social score · ${setupCount} setup${setupCount === 1 ? "" : "s"} cleared the latest screen${selection} · captured ${new Date(snapshot.generated_at_utc).toLocaleString()} · WATCH ONLY cards are monitoring-only.`;
   $("#opportunities").innerHTML = choices.length ? choices.map(card).join("") : `<div class="panel"><strong>No directional setup cleared this hour.</strong><p class="muted">${bearish} bearish candidate${bearish === 1 ? " was" : "s were"} found in the latest scan. All labels are monitoring-only until independently verified.</p></div>`;
   renderSocial(snapshot.social_context || {});
 }
@@ -191,5 +194,6 @@ $("#coin-search").addEventListener("keydown", event => { if (event.key === "Ente
 $("#refresh-button").addEventListener("click", () => boot({manual: true}));
 $("#deep-scan-button").addEventListener("click", runDeepScan);
 document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => { activeMode = tab.dataset.mode; document.querySelectorAll(".tab").forEach(item => { const selected = item === tab; item.classList.toggle("active", selected); item.setAttribute("aria-selected", String(selected)); }); $("#horizon-label").textContent = modeConfig[activeMode]?.eyebrow || "LONG-TERM HORIZON"; boot(); }));
+document.querySelectorAll(".direction-tab").forEach(tab => tab.addEventListener("click", () => { activeDirection = tab.dataset.direction; document.querySelectorAll(".direction-tab").forEach(item => item.classList.toggle("active", item === tab)); if (snapshot) render(); }));
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("service-worker.js").catch(() => {});
 boot();
