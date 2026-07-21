@@ -36,7 +36,9 @@ function renderLongTerm() {
   $("#scan-summary").textContent = "Three-month-plus horizon · no long-term directional model is enabled yet.";
   $("#opportunities").innerHTML = `<div class="panel"><strong>Long-term watchlist only</strong><p class="muted">This horizon needs thesis, fundamentals, tokenomics, and catalyst review. The app will not convert a 24-hour price move into a three-month signal.</p></div>`;
   $("#refresh-button").disabled = true;
-  $("#refresh-button").textContent = "No long-term scan yet";
+  $("#refresh-button").textContent = "Quick scan unavailable";
+  $("#deep-scan-button").disabled = true;
+  $("#deep-scan-button").textContent = "Deep scan unavailable";
 }
 
 async function refreshLiveQuotes() {
@@ -75,6 +77,48 @@ async function refreshLiveQuotes() {
   return updated;
 }
 
+function rebuildPriceMap(item) {
+  const metrics = item.metrics || {};
+  const last = Number(metrics.last); const high = Number(metrics.high_24h); const low = Number(metrics.low_24h);
+  if (![last, high, low].every(value => Number.isFinite(value) && value > 0) || high < low) { item.price_map = null; return; }
+  const range = Math.max(high - low, last * 0.005);
+  if (item.bias === "LONG_RESEARCH") item.price_map = {side: "LONG_RESEARCH", entry_low: Math.max(low, last - range * 0.35), entry_high: last, invalidation: Math.max(0, low - range * 0.25), target_one: last + range * 0.5, target_two: last + range, method: "24-hour range pullback and extension map"};
+  else if (item.bias === "SHORT_RESEARCH") item.price_map = {side: "SHORT_RESEARCH", entry_low: last, entry_high: last + range * 0.35, invalidation: high + range * 0.25, target_one: Math.max(0, last - range * 0.5), target_two: Math.max(0, last - range), method: "24-hour range rejection and extension map"};
+  else item.price_map = null;
+}
+
+async function runDeepScan() {
+  if (activeMode === "long-term" || !snapshot?.candidates?.length) return;
+  const button = $("#deep-scan-button");
+  button.disabled = true; $("#refresh-button").disabled = true; button.textContent = "Scanning history…"; $("#scan-status").textContent = "DEEP SCANNING";
+  try {
+    await refreshLiveQuotes();
+    let completed = 0;
+    await Promise.all(snapshot.candidates.map(async item => {
+      const pair = encodeURIComponent(item.pair_key || item.symbol);
+      const response = await fetch(`https://api.kraken.com/0/public/OHLC?pair=${pair}&interval=60`, {cache: "no-store"});
+      const result = await response.json();
+      const rows = Object.values(result.result || {}).find(value => Array.isArray(value)) || [];
+      const recent = rows.slice(-24);
+      const closes = recent.map(row => Number(row[4])).filter(Number.isFinite);
+      const highs = recent.map(row => Number(row[2])).filter(Number.isFinite);
+      const lows = recent.map(row => Number(row[3])).filter(Number.isFinite);
+      if (closes.length >= 3) {
+        item.metrics.high_24h = Math.max(...highs); item.metrics.low_24h = Math.min(...lows);
+        item.metrics.volatility_24h = (Math.max(...highs) - Math.min(...lows)) / Math.max(...closes[0], 0.00000001);
+        item.metrics.history_candles = closes.length;
+        rebuildPriceMap(item);
+      }
+      completed += 1; button.textContent = `Deep scan ${completed}/${snapshot.candidates.length}`;
+    }));
+    snapshot.deep_scan_updated_at_utc = new Date().toISOString();
+    render();
+    $("#scan-status").textContent = "DEEP SCAN COMPLETE";
+    $("#scan-summary").textContent += ` · Deep scan refreshed ${completed}/${snapshot.candidates.length} hourly histories and rebuilt range levels.`;
+  } catch (error) { $("#scan-status").textContent = "DEEP SCAN FAILED"; $("#scan-summary").textContent = `Deep scan could not complete: ${error.message}`; }
+  finally { button.disabled = false; $("#refresh-button").disabled = false; button.textContent = "Deep scan"; }
+}
+
 async function analyze(query) {
   const symbol = query.trim().toUpperCase();
   if (!symbol) return;
@@ -109,6 +153,7 @@ async function analyze(query) {
 
 async function boot({manual = false} = {}) {
   if (activeMode === "long-term") { renderLongTerm(); return; }
+  $("#deep-scan-button").disabled = false; $("#deep-scan-button").textContent = "Deep scan";
   const button = $("#refresh-button");
   button.disabled = true; button.textContent = "Refreshing…";
   $("#scan-status").textContent = "REFRESHING";
@@ -127,6 +172,7 @@ async function boot({manual = false} = {}) {
 $("#search-button").addEventListener("click", () => analyze($("#coin-search").value));
 $("#coin-search").addEventListener("keydown", event => { if (event.key === "Enter") analyze(event.target.value); });
 $("#refresh-button").addEventListener("click", () => boot({manual: true}));
+$("#deep-scan-button").addEventListener("click", runDeepScan);
 document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => { activeMode = tab.dataset.mode; document.querySelectorAll(".tab").forEach(item => { const selected = item === tab; item.classList.toggle("active", selected); item.setAttribute("aria-selected", String(selected)); }); $("#horizon-label").textContent = modeConfig[activeMode]?.eyebrow || "LONG-TERM HORIZON"; boot(); }));
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("service-worker.js").catch(() => {});
 boot();

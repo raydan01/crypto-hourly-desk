@@ -30,6 +30,7 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     html = (ROOT / "index.html").read_text(encoding="utf-8")
     app = (ROOT / "app.js").read_text(encoding="utf-8")
     assert 'id="refresh-button"' in html
+    assert 'id="deep-scan-button"' in html
     assert 'data-mode="hourly"' in html
     assert 'data-mode="daily"' in html
     assert 'data-mode="long-term"' in html
@@ -41,4 +42,6 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     assert "renderLongTerm" in app
     assert "refreshLiveQuotes" in app
     assert "Live Kraken quotes updated" in app
+    assert "runDeepScan" in app
+    assert "OHLC" in app
     assert "const choices = (snapshot.candidates || []).slice(0, 20)" in app
