@@ -7,6 +7,26 @@ let activeDirection = "all";
 const biasLabel = {LONG_RESEARCH: "BULLISH SETUP", SHORT_RESEARCH: "BEARISH SETUP", AVOID: "WATCH ONLY"};
 const timeframeLabel = {SHORT_TERM: "DAY TRADING", MEDIUM_LONG_TERM: "WEEKLY TRADING", LONG_TERM: "3+ MONTHS"};
 const modeConfig = {hourly: {file: "data/market-opportunities-hourly-latest.json", title: "DAY TRADING", eyebrow: "NEXT HOURLY REVIEW", interval: 60, historyLabel: "hourly"}, daily: {file: "data/market-opportunities-daily-latest.json", title: "WEEKLY TRADING", eyebrow: "NEXT WEEKLY REVIEW", interval: 1440, historyLabel: "daily"}, "long-term": {file: "data/market-opportunities-long-term-latest.json", title: "3+ MONTHS", eyebrow: "NEXT LONG-TERM REVIEW", interval: 1440, historyLabel: "daily"}};
+const DEEP_SCAN_MIN_MS = 15000;
+const REQUEST_TIMEOUT_MS = 30000;
+
+function freshUrl(url) {
+  return `${url}${url.includes("?") ? "&" : "?"}_fresh=${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+async function fetchFreshJson(url, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeout || REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(freshUrl(url), {cache: "no-store", signal: controller.signal, ...options});
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    if (payload?.error?.length) throw new Error(payload.error.join(", "));
+    return payload;
+  } finally { clearTimeout(timeout); }
+}
+
+const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
 function card(item) {
   const metrics = item.metrics || {};
@@ -49,8 +69,7 @@ function renderLongTerm() {
 
 async function refreshLiveQuotes() {
   if (!snapshot?.candidates?.length) return 0;
-  const pairsResponse = await fetch("https://api.kraken.com/0/public/AssetPairs", {cache: "no-store"});
-  const pairs = await pairsResponse.json();
+  const pairs = await fetchFreshJson("https://api.kraken.com/0/public/AssetPairs");
   const pairForSymbol = {};
   for (const [key, value] of Object.entries(pairs.result || {})) {
     if (value?.status !== "online") continue;
@@ -59,12 +78,11 @@ async function refreshLiveQuotes() {
   }
   const requested = snapshot.candidates.map(item => pairForSymbol[String(item.symbol || "").toUpperCase()]).filter(Boolean);
   if (!requested.length) return 0;
-  const tickerResponse = await fetch(`https://api.kraken.com/0/public/Ticker?pair=${encodeURIComponent(requested.join(","))}`, {cache: "no-store"});
-  const ticker = await tickerResponse.json();
+  const ticker = await fetchFreshJson(`https://api.kraken.com/0/public/Ticker?pair=${encodeURIComponent(requested.join(","))}`);
   let updated = 0;
   for (const item of snapshot.candidates) {
     const key = pairForSymbol[String(item.symbol || "").toUpperCase()];
-    const row = ticker.result?.[key] || Object.values(ticker.result || {}).find(value => value?.c && value?.o);
+    const row = ticker.result?.[key];
     if (!row) continue;
     const last = Number(row.c?.[0]);
     const bid = Number(row.b?.[0]);
@@ -80,6 +98,7 @@ async function refreshLiveQuotes() {
     updated += 1;
   }
   snapshot.live_quote_updated_at_utc = new Date().toISOString();
+  snapshot.live_quote_source = "Kraken public Ticker; cache-busted no-store request";
   return updated;
 }
 
@@ -93,41 +112,91 @@ function rebuildPriceMap(item) {
   else item.price_map = null;
 }
 
+function recalculateLiveRanking() {
+  if (!snapshot?.candidates?.length) return;
+  const socialBySymbol = Object.fromEntries((snapshot.social_context?.items || []).map(item => [String(item.symbol || "").toUpperCase(), item]));
+  const clamp = value => Math.max(-1, Math.min(1, value));
+  for (const item of snapshot.candidates) {
+    const metrics = item.metrics || {};
+    const change = Number(metrics.change_24h_pct) || 0;
+    const spread = Math.max(0, Number(metrics.spread_bps) || 0);
+    const volume = Math.max(0, Number(metrics.volume_24h_quote) || 0);
+    const volatility = Math.max(0, Number(metrics.volatility_24h) || 0);
+    const marketDirection = clamp(change / 5);
+    const directionalStrength = Math.min(Math.abs(change) / 5, 1) * 100;
+    const liquidityScore = volume ? Math.min(100, Math.sqrt(volume / 10000000) * 100) : 0;
+    const spreadScore = Math.max(0, 100 - spread * 10);
+    const volatilityScore = Math.max(0, 100 - Math.abs(volatility - 0.04) * 1200);
+    const marketScore = directionalStrength * 0.45 + liquidityScore * 0.25 + spreadScore * 0.15 + volatilityScore * 0.15;
+    const social = socialBySymbol[String(item.symbol || "").toUpperCase()] || {};
+    const counts = social.source_counts || {};
+    const attention = Math.max(0, Math.min(100, Number(social.attention_score) || 0));
+    const socialScore = Math.min(100, attention * 0.8 + Math.min(20, (Number(counts.google_news) || 0) * 0.5 + (Number(counts.reddit) || 0)));
+    const socialDirection = social.price_change_24h_pct == null ? 0 : clamp(Number(social.price_change_24h_pct) / 5);
+    const combinedDirection = marketDirection * 0.70 + socialDirection * 0.30;
+    const score = Number((marketScore * 0.70 + socialScore * 0.30).toFixed(2));
+    item.opportunity_score = score;
+    item.confidence_band = score >= 70 ? "HIGH" : score >= 45 ? "MODERATE" : "LOW";
+    item.bias = combinedDirection >= 0.25 ? "LONG_RESEARCH" : combinedDirection <= -0.25 ? "SHORT_RESEARCH" : "AVOID";
+    item.score_breakdown = {...(item.score_breakdown || {}), score, band: item.confidence_band, bias: item.bias, market_score: Number(marketScore.toFixed(2)), social_score: Number(socialScore.toFixed(2)), combined_direction: Number(combinedDirection.toFixed(4))};
+    rebuildPriceMap(item);
+  }
+  snapshot.candidates.sort((a, b) => Number(b.opportunity_score || 0) - Number(a.opportunity_score || 0) || String(a.symbol || "").localeCompare(String(b.symbol || "")));
+  snapshot.candidates.forEach((item, index) => { item.rank = index + 1; });
+  snapshot.opportunities = snapshot.candidates.filter(item => item.bias !== "AVOID");
+  snapshot.avoids = snapshot.candidates.filter(item => item.bias === "AVOID");
+}
+
 async function runDeepScan() {
   if (!snapshot?.candidates?.length) return;
   const button = $("#deep-scan-button");
   button.disabled = true; $("#refresh-button").disabled = true; button.textContent = "Scanning history…"; $("#scan-status").textContent = "DEEP SCANNING";
+  const startedAt = performance.now();
   try {
     await refreshLiveQuotes();
-    const pairs = await fetch("https://api.kraken.com/0/public/AssetPairs", {cache: "no-store"}).then(response => response.json());
+    recalculateLiveRanking();
+    const pairs = await fetchFreshJson("https://api.kraken.com/0/public/AssetPairs");
     const pairForSymbol = {};
     for (const [key, value] of Object.entries(pairs.result || {})) {
       if (value?.status !== "online") continue;
       const base = String(value?.wsname || "").split("/")[0].toUpperCase().replace("XBT", "BTC").replace("XDG", "DOGE");
       if (base && !pairForSymbol[base]) pairForSymbol[base] = key;
     }
-    let completed = 0;
-    await Promise.all(snapshot.candidates.map(async item => {
+    const results = await Promise.all(snapshot.candidates.map(async item => {
       const pair = encodeURIComponent(pairForSymbol[String(item.symbol || "").toUpperCase()] || item.pair_key || item.symbol);
-      const response = await fetch(`https://api.kraken.com/0/public/OHLC?pair=${pair}&interval=${modeConfig[activeMode].interval}`, {cache: "no-store"});
-      const result = await response.json();
-      const rows = Object.values(result.result || {}).find(value => Array.isArray(value)) || [];
-      const recent = rows.slice(activeMode === "hourly" ? -24 : -90);
-      const closes = recent.map(row => Number(row[4])).filter(Number.isFinite);
-      const highs = recent.map(row => Number(row[2])).filter(Number.isFinite);
-      const lows = recent.map(row => Number(row[3])).filter(Number.isFinite);
-      if (closes.length >= 3) {
+      try {
+        const result = await fetchFreshJson(`https://api.kraken.com/0/public/OHLC?pair=${pair}&interval=${modeConfig[activeMode].interval}`);
+        const rows = Object.values(result.result || {}).find(value => Array.isArray(value)) || [];
+        const recent = rows.slice(activeMode === "hourly" ? -24 : -90);
+        const closes = recent.map(row => Number(row[4])).filter(Number.isFinite);
+        const highs = recent.map(row => Number(row[2])).filter(Number.isFinite);
+        const lows = recent.map(row => Number(row[3])).filter(Number.isFinite);
+        if (closes.length < 3) throw new Error("insufficient OHLC candles");
         item.metrics.high_24h = Math.max(...highs); item.metrics.low_24h = Math.min(...lows);
-        item.metrics.volatility_24h = (Math.max(...highs) - Math.min(...lows)) / Math.max(...closes[0], 0.00000001);
+        item.metrics.volatility_24h = (Math.max(...highs) - Math.min(...lows)) / Math.max(closes[0], 0.00000001);
         item.metrics.history_candles = closes.length;
+        item.deep_scan_observed_at_utc = new Date().toISOString();
         rebuildPriceMap(item);
+        return true;
+      } catch (error) {
+        item.deep_scan_error = error.name === "AbortError" ? "request timeout" : error.message;
+        return false;
       }
-      completed += 1; button.textContent = `Deep scan ${completed}/${snapshot.candidates.length}`;
     }));
+    const completed = results.filter(Boolean).length;
+    const failed = results.length - completed;
+    const elapsed = performance.now() - startedAt;
+    if (elapsed < DEEP_SCAN_MIN_MS) await delay(DEEP_SCAN_MIN_MS - elapsed);
+    const finishedAt = new Date().toISOString();
     snapshot.deep_scan_updated_at_utc = new Date().toISOString();
+    snapshot.deep_scan_duration_seconds = Number(((performance.now() - startedAt) / 1000).toFixed(1));
+    snapshot.deep_scan_source_as_of_utc = finishedAt;
+    snapshot.deep_scan_completed = completed;
+    snapshot.deep_scan_failed = failed;
+
     render();
-    $("#scan-status").textContent = "DEEP SCAN COMPLETE";
-    $("#scan-summary").textContent += ` · Deep scan refreshed ${completed}/${snapshot.candidates.length} ${modeConfig[activeMode].historyLabel} histories and rebuilt range levels.`;
+    $("#scan-status").textContent = failed ? "DEEP SCAN DEGRADED" : "DEEP SCAN COMPLETE";
+    $("#scan-summary").textContent += ` · Deep scan completed in ${snapshot.deep_scan_duration_seconds}s: ${completed}/${snapshot.candidates.length} fresh ${modeConfig[activeMode].historyLabel} histories, ${failed} failed.`;
   } catch (error) { $("#scan-status").textContent = "DEEP SCAN FAILED"; $("#scan-summary").textContent = `Deep scan could not complete: ${error.message}`; }
   finally { button.disabled = false; $("#refresh-button").disabled = false; button.textContent = "Deep scan"; }
 }
@@ -172,11 +241,13 @@ async function boot({manual = false} = {}) {
   $("#scan-status").textContent = "REFRESHING";
   const previousTimestamp = snapshot?.generated_at_utc;
   try {
-    snapshot = await fetch(`${modeConfig[activeMode].file}?ts=${Date.now()}`, {cache:"no-store"}).then(r => r.json());
+    snapshot = await fetchFreshJson(modeConfig[activeMode].file);
     const liveCount = await refreshLiveQuotes();
+    recalculateLiveRanking();
     render();
     const liveTime = snapshot.live_quote_updated_at_utc ? new Date(snapshot.live_quote_updated_at_utc).toLocaleTimeString([], {hour: "numeric", minute: "2-digit"}) : "unavailable";
-    $("#scan-summary").textContent += ` · Live Kraken quotes updated ${liveTime} (${liveCount}/${snapshot.candidates.length}); quality screen captured ${new Date(snapshot.generated_at_utc).toLocaleString()}.`;
+    const socialTime = snapshot.social_context?.captured_at_utc ? new Date(snapshot.social_context.captured_at_utc).toLocaleString() : "unavailable";
+    $("#scan-summary").textContent += ` · Live Kraken quotes updated ${liveTime} (${liveCount}/${snapshot.candidates.length}); market artifact captured ${new Date(snapshot.generated_at_utc).toLocaleString()}; social/news artifact captured ${socialTime}.`;
     if (manual && previousTimestamp && previousTimestamp === snapshot.generated_at_utc) { $("#scan-status").textContent = `LIVE ${modeConfig[activeMode].title}`; }
   }
   catch (error) { $("#scan-status").textContent = "UNAVAILABLE"; $("#scan-summary").textContent = "Hourly snapshot unavailable. Try Refresh scan again."; }

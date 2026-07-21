@@ -70,6 +70,11 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     assert "activeDirection" in app
     assert "CoinGecko" in html
     assert "OHLC" in app
+    assert "cache-busted no-store request" in app
+    assert "DEEP_SCAN_MIN_MS = 15000" in app
+    assert "deep_scan_duration_seconds" in app
+    assert "recalculateLiveRanking" in app
+    assert "social/news artifact captured" in app
     assert "const allChoices = snapshot.candidates || []" in app
     assert "market-opportunities-long-term-latest.json" in app
     assert "interval=${modeConfig[activeMode].interval}" in app
