@@ -30,7 +30,7 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     html = (ROOT / "index.html").read_text(encoding="utf-8")
     app = (ROOT / "app.js").read_text(encoding="utf-8")
     assert 'id="refresh-button"' in html
-    assert 'addEventListener("click", boot)' in app
+    assert 'addEventListener("click", () => boot({manual: true}))' in app
     assert "SHORT research candidate" in app
     assert "non-executable" in app
     assert "const choices = (snapshot.candidates || []).slice(0, 20)" in app
