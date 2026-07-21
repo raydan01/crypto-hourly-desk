@@ -15,6 +15,8 @@ def test_mobile_package_has_installable_shell_and_hourly_snapshot():
     assert payload["cadence"] == "hourly"
     assert payload["execution_allowed"] is False
     assert payload["trade_authorization"] is False
+    assert payload["social_context"]["research_only"] is True
+    assert payload["social_context"]["trade_authorization"] is False
     assert payload["selection_counts"]["watchlist_requested"] == 16
     assert payload["selection_counts"]["discovery_requested"] == 4
     assert len(payload["candidates"]) <= 20
@@ -43,5 +45,7 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     assert "refreshLiveQuotes" in app
     assert "Live Kraken quotes updated" in app
     assert "runDeepScan" in app
+    assert "renderSocial" in app
+    assert "CoinGecko" in html
     assert "OHLC" in app
     assert "const choices = (snapshot.candidates || []).slice(0, 20)" in app

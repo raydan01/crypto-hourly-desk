@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 from research.market_opportunities import build_opportunity_payload, realized_volatility
 from research.market_scanner import scan_markets
+from social_context import build_social_context
 
 ROOT = Path(__file__).parent
 OUTPUT = ROOT / "data" / "market-opportunities-hourly-latest.json"
@@ -116,6 +117,8 @@ def build_snapshot(cadence: str = "hourly") -> dict:
     payload["candidates"] = [item for item in payload["candidates"] if item.get("universe_bucket") == "WATCHLIST"] + [item for item in payload["candidates"] if item.get("universe_bucket") == "DISCOVERY"]
     payload["selection_counts"] = {"watchlist_requested": 16, "watchlist_selected": min(16, len(selected_watched) + len(rejected_watchlist[: max(0, 16 - len(selected_watched))])), "discovery_requested": 4, "discovery_selected": len(selected_discovery)}
     payload["selection_policy"] = "16 highest-ranked watched coins plus 4 highest-ranked non-watchlist coins; failed watched coins remain visible as AVOID"
+    payload["social_context"] = build_social_context()
+    payload["social_context_status"] = payload["social_context"].get("status", "NO_DATA")
     return payload
 
 
