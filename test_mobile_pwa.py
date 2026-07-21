@@ -1,8 +1,17 @@
 import json
 from pathlib import Path
 
+from research.market_opportunities import score_candidate
+
 
 ROOT = Path(__file__).parent
+
+
+def test_social_context_can_change_neutral_market_direction_and_score_is_bounded():
+    item = {"metrics": {"change_24h_pct": 0.1, "spread_bps": 1, "volume_24h_quote": 1000000, "volatility_24h": 0.04}}
+    result = score_candidate(item, {"attention_score": 90, "price_change_24h_pct": 4, "source_counts": {"google_news": 10, "reddit": 5}})
+    assert result["bias"] == "LONG_RESEARCH"
+    assert 0 <= result["score"] <= 100
 
 
 def test_mobile_package_has_installable_shell_and_hourly_snapshot():
@@ -17,6 +26,9 @@ def test_mobile_package_has_installable_shell_and_hourly_snapshot():
     assert payload["trade_authorization"] is False
     assert payload["social_context"]["research_only"] is True
     assert payload["social_context"]["trade_authorization"] is False
+    scores = [item["opportunity_score"] for item in payload["candidates"]]
+    assert scores == sorted(scores, reverse=True)
+    assert all(0 <= score <= 100 for score in scores)
     assert payload["selection_counts"]["watchlist_requested"] == 16
     assert payload["selection_counts"]["discovery_requested"] == 4
     assert len(payload["candidates"]) <= 20
@@ -46,6 +58,8 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     assert "Live Kraken quotes updated" in app
     assert "runDeepScan" in app
     assert "renderSocial" in app
+    assert "combined market + social score" in app
+    assert "opportunity_score" in app
     assert "CoinGecko" in html
     assert "OHLC" in app
     assert "const choices = (snapshot.candidates || []).slice(0, 20)" in app

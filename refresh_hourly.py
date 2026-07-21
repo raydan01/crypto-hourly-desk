@@ -91,7 +91,8 @@ def build_snapshot(cadence: str = "hourly") -> dict:
         item["universe_bucket"] = "DISCOVERY"
     selected = selected_watched + selected_discovery
     focused_scan = {**scan, "candidates": selected}
-    payload = build_opportunity_payload(focused_scan, generated_at_utc=captured, cadence=cadence)
+    social = build_social_context()
+    payload = build_opportunity_payload(focused_scan, generated_at_utc=captured, cadence=cadence, social_context=social)
     selected_symbols = {item["symbol"] for item in selected}
     rejected_watchlist = [item for item in scan.get("rejections", []) if str(item.get("symbol") or "").upper() in watched_symbols and str(item.get("symbol") or "").upper() not in selected_symbols]
     for rejection in rejected_watchlist[: max(0, 16 - len(selected_watched))]:
@@ -102,6 +103,9 @@ def build_snapshot(cadence: str = "hourly") -> dict:
             "rank_score": 0,
             "rank": len(payload["candidates"]) + 1,
             "bias": "AVOID",
+            "opportunity_score": 0,
+            "confidence_band": "LOW",
+            "score_breakdown": {"score": 0, "band": "LOW", "bias": "AVOID", "market_score": 0, "social_score": 0, "market_direction": 0, "social_direction": 0, "combined_direction": 0, "social_sources": []},
             "timeframe": "SHORT_TERM",
             "metrics": {"last": source.get("last"), "bid": source.get("bid"), "ask": source.get("ask"), "change_24h_pct": source.get("change_24h_pct"), "spread_bps": rejection.get("metrics", {}).get("spread_bps"), "volume_24h_quote": source.get("volume_24h_quote"), "volatility_24h": source.get("volatility_24h")},
             "margin_status": "unknown",
@@ -115,9 +119,12 @@ def build_snapshot(cadence: str = "hourly") -> dict:
         }
         payload["candidates"].append(extra)
     payload["candidates"] = [item for item in payload["candidates"] if item.get("universe_bucket") == "WATCHLIST"] + [item for item in payload["candidates"] if item.get("universe_bucket") == "DISCOVERY"]
+    payload["candidates"].sort(key=lambda item: (-float(item.get("opportunity_score", 0)), str(item.get("symbol", ""))))
+    for index, item in enumerate(payload["candidates"], start=1):
+        item["rank"] = index
     payload["selection_counts"] = {"watchlist_requested": 16, "watchlist_selected": min(16, len(selected_watched) + len(rejected_watchlist[: max(0, 16 - len(selected_watched))])), "discovery_requested": 4, "discovery_selected": len(selected_discovery)}
     payload["selection_policy"] = "16 highest-ranked watched coins plus 4 highest-ranked non-watchlist coins; failed watched coins remain visible as AVOID"
-    payload["social_context"] = build_social_context()
+    payload["social_context"] = social
     payload["social_context_status"] = payload["social_context"].get("status", "NO_DATA")
     return payload
 
