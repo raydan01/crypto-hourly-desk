@@ -14,7 +14,7 @@ function card(item) {
   const bias = biasLabel[biasKey] || biasKey.replaceAll("_", " ");
   const tone = bias.includes("LONG") ? "long" : bias.includes("SHORT") ? "short" : "avoid";
   const setup = map ? `<div class="setup"><div><span>Entry zone</span><strong>${price(map.entry_low)} – ${price(map.entry_high)}</strong></div><div><span>Invalidation</span><strong>${price(map.invalidation)}</strong></div><div><span>Target 1</span><strong>${price(map.target_one)}</strong></div><div><span>Target 2</span><strong>${price(map.target_two)}</strong></div></div>` : "";
-  return `<article class="card"><div class="card-top"><span class="symbol">${escapeHtml(item.symbol)}</span><span class="bias ${tone}">${escapeHtml(bias)}</span></div><div class="card-meta">${escapeHtml(timeframeLabel[item.timeframe] || item.timeframe || "INTRADAY")} · margin ${escapeHtml(item.margin_status || "unknown")}</div><p class="reason">${escapeHtml(item.explanation?.quick_reason || item.avoid_reason || "Quality screen result")}</p><div class="metrics"><div class="metric"><span>24h change</span><strong>${metrics.change_24h_pct == null ? "n/a" : Number(metrics.change_24h_pct).toFixed(2) + "%"}</strong></div><div class="metric"><span>Spread</span><strong>${metrics.spread_bps == null ? "n/a" : Number(metrics.spread_bps).toFixed(2) + " bps"}</strong></div></div>${setup}</article>`;
+  return `<article class="card"><div class="card-top"><span class="symbol">${escapeHtml(item.symbol)}</span><span class="bias ${tone}">${escapeHtml(bias)}</span></div><div class="card-meta">${escapeHtml(timeframeLabel[item.timeframe] || item.timeframe || "INTRADAY")} · margin ${escapeHtml(item.margin_status || "unknown")}</div><p class="reason">${escapeHtml(item.explanation?.quick_reason || item.avoid_reason || "Quality screen result")}</p><div class="metrics"><div class="metric"><span>Live price</span><strong>${price(metrics.last)}</strong></div><div class="metric"><span>24h change</span><strong>${metrics.change_24h_pct == null ? "n/a" : Number(metrics.change_24h_pct).toFixed(2) + "%"}</strong></div><div class="metric"><span>Spread</span><strong>${metrics.spread_bps == null ? "n/a" : Number(metrics.spread_bps).toFixed(2) + " bps"}</strong></div></div>${setup}</article>`;
 }
 
 function render() {
@@ -37,6 +37,42 @@ function renderLongTerm() {
   $("#opportunities").innerHTML = `<div class="panel"><strong>Long-term watchlist only</strong><p class="muted">This horizon needs thesis, fundamentals, tokenomics, and catalyst review. The app will not convert a 24-hour price move into a three-month signal.</p></div>`;
   $("#refresh-button").disabled = true;
   $("#refresh-button").textContent = "No long-term scan yet";
+}
+
+async function refreshLiveQuotes() {
+  if (!snapshot?.candidates?.length) return 0;
+  const pairsResponse = await fetch("https://api.kraken.com/0/public/AssetPairs", {cache: "no-store"});
+  const pairs = await pairsResponse.json();
+  const pairForSymbol = {};
+  for (const [key, value] of Object.entries(pairs.result || {})) {
+    if (value?.status !== "online") continue;
+    const base = String(value?.wsname || "").split("/")[0].toUpperCase().replace("XBT", "BTC").replace("XDG", "DOGE");
+    if (base && !pairForSymbol[base]) pairForSymbol[base] = key;
+  }
+  const requested = snapshot.candidates.map(item => pairForSymbol[String(item.symbol || "").toUpperCase()]).filter(Boolean);
+  if (!requested.length) return 0;
+  const tickerResponse = await fetch(`https://api.kraken.com/0/public/Ticker?pair=${encodeURIComponent(requested.join(","))}`, {cache: "no-store"});
+  const ticker = await tickerResponse.json();
+  let updated = 0;
+  for (const item of snapshot.candidates) {
+    const key = pairForSymbol[String(item.symbol || "").toUpperCase()];
+    const row = ticker.result?.[key] || Object.values(ticker.result || {}).find(value => value?.c && value?.o);
+    if (!row) continue;
+    const last = Number(row.c?.[0]);
+    const bid = Number(row.b?.[0]);
+    const ask = Number(row.a?.[0]);
+    const opening = Number(row.o);
+    if (!Number.isFinite(last)) continue;
+    item.metrics = item.metrics || {};
+    item.metrics.last = last;
+    if (Number.isFinite(bid)) item.metrics.bid = bid;
+    if (Number.isFinite(ask)) item.metrics.ask = ask;
+    if (Number.isFinite(bid) && Number.isFinite(ask) && (bid + ask) > 0) item.metrics.spread_bps = ((ask - bid) / ((ask + bid) / 2)) * 10000;
+    if (Number.isFinite(opening) && opening > 0) item.metrics.change_24h_pct = ((last / opening) - 1) * 100;
+    updated += 1;
+  }
+  snapshot.live_quote_updated_at_utc = new Date().toISOString();
+  return updated;
 }
 
 async function analyze(query) {
@@ -77,7 +113,14 @@ async function boot({manual = false} = {}) {
   button.disabled = true; button.textContent = "Refreshing…";
   $("#scan-status").textContent = "REFRESHING";
   const previousTimestamp = snapshot?.generated_at_utc;
-  try { snapshot = await fetch(`${modeConfig[activeMode].file}?ts=${Date.now()}`, {cache:"no-store"}).then(r => r.json()); render(); if (manual && previousTimestamp && previousTimestamp === snapshot.generated_at_utc) { $("#scan-status").textContent = `CURRENT ${modeConfig[activeMode].title}`; $("#scan-summary").textContent += ` · No newer ${activeMode} snapshot yet.`; } }
+  try {
+    snapshot = await fetch(`${modeConfig[activeMode].file}?ts=${Date.now()}`, {cache:"no-store"}).then(r => r.json());
+    const liveCount = await refreshLiveQuotes();
+    render();
+    const liveTime = snapshot.live_quote_updated_at_utc ? new Date(snapshot.live_quote_updated_at_utc).toLocaleTimeString([], {hour: "numeric", minute: "2-digit"}) : "unavailable";
+    $("#scan-summary").textContent += ` · Live Kraken quotes updated ${liveTime} (${liveCount}/${snapshot.candidates.length}); quality screen captured ${new Date(snapshot.generated_at_utc).toLocaleString()}.`;
+    if (manual && previousTimestamp && previousTimestamp === snapshot.generated_at_utc) { $("#scan-status").textContent = `LIVE ${modeConfig[activeMode].title}`; }
+  }
   catch (error) { $("#scan-status").textContent = "UNAVAILABLE"; $("#scan-summary").textContent = "Hourly snapshot unavailable. Try Refresh scan again."; }
   finally { button.disabled = false; button.textContent = "Refresh scan"; }
 }

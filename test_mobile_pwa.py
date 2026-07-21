@@ -39,5 +39,6 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     assert "WATCH ONLY" in app
     assert "monitoring-only" in app
     assert "renderLongTerm" in app
+    assert "refreshLiveQuotes" in app
+    assert "Live Kraken quotes updated" in app
     assert "const choices = (snapshot.candidates || []).slice(0, 20)" in app
-    assert "No newer ${activeMode} snapshot yet" in app
