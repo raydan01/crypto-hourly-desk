@@ -1,4 +1,4 @@
-const CACHE = "crypto-hourly-desk-v2";
+const CACHE = "crypto-hourly-desk-v3";
 const SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./manifest.json", "./icon.svg", "./data/market-opportunities-hourly-latest.json"];
 self.addEventListener("install", event => { event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener("activate", event => event.waitUntil(self.clients.claim()));
