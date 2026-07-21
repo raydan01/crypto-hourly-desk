@@ -35,7 +35,7 @@ def classify_bias(change_24h_pct: Any, margin_status: str, config: OpportunityCo
         return "AVOID"
     if change >= active.long_change_pct:
         return "LONG_RESEARCH"
-    if change <= active.short_change_pct and margin_status == "verified_enabled":
+    if change <= active.short_change_pct:
         return "SHORT_RESEARCH"
     return "AVOID"
 
@@ -99,7 +99,12 @@ def build_opportunity_payload(
         change = metrics.get("change_24h_pct")
         margin_status = str(item.get("margin_status") or "unknown")
         bias = classify_bias(change, margin_status, active)
-        quick_reason = "Quality filters passed; directional movement cleared the research threshold." if bias != "AVOID" else "Quality filters passed, but directional movement did not clear the research threshold."
+        if bias == "SHORT_RESEARCH" and margin_status != "verified_enabled":
+            quick_reason = "Quality filters passed and bearish movement cleared the research threshold. SHORT research is visible, but margin permission is not verified; no short execution is allowed."
+        elif bias != "AVOID":
+            quick_reason = "Quality filters passed; directional movement cleared the research threshold."
+        else:
+            quick_reason = "Quality filters passed, but directional movement did not clear the research threshold."
         candidates.append({
             **item,
             "bias": bias,

@@ -15,10 +15,10 @@ function card(item) {
 function render() {
   const choices = (snapshot.opportunities || []).slice(0, 6);
   const avoids = (snapshot.avoids || []).filter(item => item.bias === "AVOID").slice(0, 2);
-  const bearish = (snapshot.candidates || []).filter(item => Number(item.metrics?.change_24h_pct) <= -0.5).length;
+  const bearish = (snapshot.candidates || []).filter(item => item.bias === "SHORT_RESEARCH").length;
   $("#scan-status").textContent = snapshot.status === "READY" ? "FRESH HOURLY" : String(snapshot.status || "NOT READY").replaceAll("_", " ");
   $("#scan-summary").textContent = `${choices.length} setup${choices.length === 1 ? "" : "s"} cleared the latest Kraken quality screen · captured ${new Date(snapshot.generated_at_utc).toLocaleString()} · ${avoids.length} shown as avoid.`;
-  $("#opportunities").innerHTML = choices.length ? choices.map(card).join("") : `<div class="panel"><strong>No LONG setup cleared this hour.</strong><p class="muted">${bearish} bearish market${bearish === 1 ? " was" : "s were"} screened, but SHORT research is blocked because Kraken margin permission is not verified. The scanner is working and remains fail-closed.</p></div>`;
+  $("#opportunities").innerHTML = choices.length ? choices.map(card).join("") : `<div class="panel"><strong>No directional setup cleared this hour.</strong><p class="muted">${bearish} SHORT research candidate${bearish === 1 ? " was" : "s were"} found in the latest scan. Research labels remain non-executable until independently verified.</p></div>`;
 }
 
 async function analyze(query) {
