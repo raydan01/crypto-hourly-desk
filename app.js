@@ -93,9 +93,16 @@ async function runDeepScan() {
   button.disabled = true; $("#refresh-button").disabled = true; button.textContent = "Scanning history…"; $("#scan-status").textContent = "DEEP SCANNING";
   try {
     await refreshLiveQuotes();
+    const pairs = await fetch("https://api.kraken.com/0/public/AssetPairs", {cache: "no-store"}).then(response => response.json());
+    const pairForSymbol = {};
+    for (const [key, value] of Object.entries(pairs.result || {})) {
+      if (value?.status !== "online") continue;
+      const base = String(value?.wsname || "").split("/")[0].toUpperCase().replace("XBT", "BTC").replace("XDG", "DOGE");
+      if (base && !pairForSymbol[base]) pairForSymbol[base] = key;
+    }
     let completed = 0;
     await Promise.all(snapshot.candidates.map(async item => {
-      const pair = encodeURIComponent(item.pair_key || item.symbol);
+      const pair = encodeURIComponent(pairForSymbol[String(item.symbol || "").toUpperCase()] || item.pair_key || item.symbol);
       const response = await fetch(`https://api.kraken.com/0/public/OHLC?pair=${pair}&interval=60`, {cache: "no-store"});
       const result = await response.json();
       const rows = Object.values(result.result || {}).find(value => Array.isArray(value)) || [];
@@ -167,7 +174,7 @@ async function boot({manual = false} = {}) {
     if (manual && previousTimestamp && previousTimestamp === snapshot.generated_at_utc) { $("#scan-status").textContent = `LIVE ${modeConfig[activeMode].title}`; }
   }
   catch (error) { $("#scan-status").textContent = "UNAVAILABLE"; $("#scan-summary").textContent = "Hourly snapshot unavailable. Try Refresh scan again."; }
-  finally { button.disabled = false; button.textContent = "Refresh scan"; }
+  finally { button.disabled = false; button.textContent = "Quick scan"; }
 }
 $("#search-button").addEventListener("click", () => analyze($("#coin-search").value));
 $("#coin-search").addEventListener("keydown", event => { if (event.key === "Enter") analyze(event.target.value); });
