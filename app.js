@@ -2,8 +2,10 @@ const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? "").replace(/[&<>\"]/g, character => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[character]));
 const price = value => value == null ? "n/a" : Number(value).toLocaleString(undefined, { maximumSignificantDigits: 8 });
 let snapshot = null;
+let activeMode = "hourly";
 const biasLabel = {LONG_RESEARCH: "BULLISH SETUP", SHORT_RESEARCH: "BEARISH SETUP", AVOID: "WATCH ONLY"};
-const timeframeLabel = {SHORT_TERM: "INTRADAY", MEDIUM_LONG_TERM: "MEDIUM-TERM"};
+const timeframeLabel = {SHORT_TERM: "DAY TRADING", MEDIUM_LONG_TERM: "WEEKLY TRADING", LONG_TERM: "3+ MONTHS"};
+const modeConfig = {hourly: {file: "data/market-opportunities-hourly-latest.json", title: "DAY TRADING", eyebrow: "NEXT HOURLY REVIEW"}, daily: {file: "data/market-opportunities-daily-latest.json", title: "WEEKLY TRADING", eyebrow: "NEXT WEEKLY REVIEW"}};
 
 function card(item) {
   const metrics = item.metrics || {};
@@ -20,11 +22,21 @@ function render() {
   const setupCount = (snapshot.opportunities || []).length;
   const avoids = (snapshot.avoids || []).filter(item => item.bias === "AVOID").slice(0, 2);
   const bearish = (snapshot.candidates || []).filter(item => item.bias === "SHORT_RESEARCH").length;
-  $("#scan-status").textContent = snapshot.status === "READY" ? "FRESH HOURLY" : String(snapshot.status || "NOT READY").replaceAll("_", " ");
+  const mode = modeConfig[activeMode];
+  $("#scan-status").textContent = snapshot.status === "READY" ? `FRESH ${mode.title}` : String(snapshot.status || "NOT READY").replaceAll("_", " ");
   const counts = snapshot.selection_counts || {};
   const selection = counts.watchlist_selected != null ? ` · ${counts.watchlist_selected} watched + ${counts.discovery_selected} discovery` : "";
   $("#scan-summary").textContent = `${choices.length} markets shown · ${setupCount} setup${setupCount === 1 ? "" : "s"} cleared the latest Kraken quality screen${selection} · captured ${new Date(snapshot.generated_at_utc).toLocaleString()} · WATCH ONLY cards are monitoring-only.`;
   $("#opportunities").innerHTML = choices.length ? choices.map(card).join("") : `<div class="panel"><strong>No directional setup cleared this hour.</strong><p class="muted">${bearish} bearish candidate${bearish === 1 ? " was" : "s were"} found in the latest scan. All labels are monitoring-only until independently verified.</p></div>`;
+}
+
+function renderLongTerm() {
+  snapshot = null;
+  $("#scan-status").textContent = "WATCHLIST ONLY";
+  $("#scan-summary").textContent = "Three-month-plus horizon · no long-term directional model is enabled yet.";
+  $("#opportunities").innerHTML = `<div class="panel"><strong>Long-term watchlist only</strong><p class="muted">This horizon needs thesis, fundamentals, tokenomics, and catalyst review. The app will not convert a 24-hour price move into a three-month signal.</p></div>`;
+  $("#refresh-button").disabled = true;
+  $("#refresh-button").textContent = "No long-term scan yet";
 }
 
 async function analyze(query) {
@@ -60,16 +72,18 @@ async function analyze(query) {
 }
 
 async function boot({manual = false} = {}) {
+  if (activeMode === "long-term") { renderLongTerm(); return; }
   const button = $("#refresh-button");
   button.disabled = true; button.textContent = "Refreshing…";
   $("#scan-status").textContent = "REFRESHING";
   const previousTimestamp = snapshot?.generated_at_utc;
-  try { snapshot = await fetch(`data/market-opportunities-hourly-latest.json?ts=${Date.now()}`, {cache:"no-store"}).then(r => r.json()); render(); if (manual && previousTimestamp && previousTimestamp === snapshot.generated_at_utc) { $("#scan-status").textContent = "CURRENT HOURLY"; $("#scan-summary").textContent += " · No newer hourly snapshot yet; the scheduled scan has not published a new result."; } }
+  try { snapshot = await fetch(`${modeConfig[activeMode].file}?ts=${Date.now()}`, {cache:"no-store"}).then(r => r.json()); render(); if (manual && previousTimestamp && previousTimestamp === snapshot.generated_at_utc) { $("#scan-status").textContent = `CURRENT ${modeConfig[activeMode].title}`; $("#scan-summary").textContent += ` · No newer ${activeMode} snapshot yet.`; } }
   catch (error) { $("#scan-status").textContent = "UNAVAILABLE"; $("#scan-summary").textContent = "Hourly snapshot unavailable. Try Refresh scan again."; }
   finally { button.disabled = false; button.textContent = "Refresh scan"; }
 }
 $("#search-button").addEventListener("click", () => analyze($("#coin-search").value));
 $("#coin-search").addEventListener("keydown", event => { if (event.key === "Enter") analyze(event.target.value); });
 $("#refresh-button").addEventListener("click", () => boot({manual: true}));
+document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => { activeMode = tab.dataset.mode; document.querySelectorAll(".tab").forEach(item => { const selected = item === tab; item.classList.toggle("active", selected); item.setAttribute("aria-selected", String(selected)); }); $("#horizon-label").textContent = modeConfig[activeMode]?.eyebrow || "LONG-TERM HORIZON"; boot(); }));
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("service-worker.js").catch(() => {});
 boot();

@@ -51,7 +51,7 @@ def eligible_pairs(asset_pairs: dict) -> dict[str, dict[str, str]]:
     return result
 
 
-def build_snapshot() -> dict:
+def build_snapshot(cadence: str = "hourly") -> dict:
     captured = datetime.now(timezone.utc).isoformat()
     pairs = eligible_pairs(request_json("/AssetPairs"))
     ticker = request_json("/Ticker", {"pair": ",".join(item["pair_key"] for item in pairs.values())})
@@ -90,7 +90,7 @@ def build_snapshot() -> dict:
         item["universe_bucket"] = "DISCOVERY"
     selected = selected_watched + selected_discovery
     focused_scan = {**scan, "candidates": selected}
-    payload = build_opportunity_payload(focused_scan, generated_at_utc=captured, cadence="hourly")
+    payload = build_opportunity_payload(focused_scan, generated_at_utc=captured, cadence=cadence)
     selected_symbols = {item["symbol"] for item in selected}
     rejected_watchlist = [item for item in scan.get("rejections", []) if str(item.get("symbol") or "").upper() in watched_symbols and str(item.get("symbol") or "").upper() not in selected_symbols]
     for rejection in rejected_watchlist[: max(0, 16 - len(selected_watched))]:

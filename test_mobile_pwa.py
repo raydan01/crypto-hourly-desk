@@ -30,10 +30,14 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     html = (ROOT / "index.html").read_text(encoding="utf-8")
     app = (ROOT / "app.js").read_text(encoding="utf-8")
     assert 'id="refresh-button"' in html
+    assert 'data-mode="hourly"' in html
+    assert 'data-mode="daily"' in html
+    assert 'data-mode="long-term"' in html
     assert 'addEventListener("click", () => boot({manual: true}))' in app
     assert "BULLISH SETUP" in app
     assert "BEARISH SETUP" in app
     assert "WATCH ONLY" in app
     assert "monitoring-only" in app
+    assert "renderLongTerm" in app
     assert "const choices = (snapshot.candidates || []).slice(0, 20)" in app
-    assert "No newer hourly snapshot yet" in app
+    assert "No newer ${activeMode} snapshot yet" in app

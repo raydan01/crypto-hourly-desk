@@ -24,7 +24,12 @@
       <p id="search-status" class="muted">Public Kraken USD spot data only.</p>
       <div id="search-result" class="result" hidden></div>
     </section>
-    <section class="section-head"><div><p class="eyebrow">NEXT HOURLY REVIEW</p><h2>Trading opportunities</h2></div><span id="scan-status" class="pill">LOADING</span></section>
+    <section class="section-head"><div><p id="horizon-label" class="eyebrow">NEXT HOURLY REVIEW</p><h2>Trading opportunities</h2></div><span id="scan-status" class="pill">LOADING</span></section>
+    <div class="tabs" role="tablist" aria-label="Trading horizon">
+      <button class="tab active" type="button" role="tab" aria-selected="true" data-mode="hourly">Day trading</button>
+      <button class="tab" type="button" role="tab" aria-selected="false" data-mode="daily">Weekly trading</button>
+      <button class="tab" type="button" role="tab" aria-selected="false" data-mode="long-term">3+ months</button>
+    </div>
     <p id="scan-summary" class="muted">Loading the latest hourly scan…</p>
     <div class="scan-actions"><button id="refresh-button" type="button">Refresh hourly scan</button></div>
     <section id="opportunities" class="cards"></section>
