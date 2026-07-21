@@ -20,6 +20,8 @@ def test_mobile_package_has_installable_shell_and_hourly_snapshot():
     assert manifest["icons"]
     assert (ROOT / "index.html").is_file()
     assert (ROOT / "service-worker.js").is_file()
+    assert (ROOT / "data" / "market-opportunities-daily-latest.json").is_file()
+    assert (ROOT / "data" / "market-opportunities-long-term-latest.json").is_file()
     payload = json.loads((ROOT / "data" / "market-opportunities-hourly-latest.json").read_text(encoding="utf-8"))
     assert payload["cadence"] == "hourly"
     assert payload["execution_allowed"] is False
@@ -32,6 +34,10 @@ def test_mobile_package_has_installable_shell_and_hourly_snapshot():
     assert payload["selection_counts"]["watchlist_requested"] == 16
     assert payload["selection_counts"]["discovery_requested"] == 4
     assert len(payload["candidates"]) <= 20
+    for filename, timeframe in (("market-opportunities-daily-latest.json", "MEDIUM_LONG_TERM"), ("market-opportunities-long-term-latest.json", "LONG_TERM")):
+        horizon = json.loads((ROOT / "data" / filename).read_text(encoding="utf-8"))
+        assert horizon["candidates"]
+        assert all("opportunity_score" in item and item["timeframe"] == timeframe for item in horizon["candidates"])
 
 
 def test_mobile_package_contains_no_private_dashboard_assets():
@@ -65,3 +71,5 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     assert "CoinGecko" in html
     assert "OHLC" in app
     assert "const allChoices = snapshot.candidates || []" in app
+    assert "market-opportunities-long-term-latest.json" in app
+    assert "interval=${modeConfig[activeMode].interval}" in app

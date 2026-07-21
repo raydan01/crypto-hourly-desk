@@ -6,7 +6,7 @@ let activeMode = "hourly";
 let activeDirection = "all";
 const biasLabel = {LONG_RESEARCH: "BULLISH SETUP", SHORT_RESEARCH: "BEARISH SETUP", AVOID: "WATCH ONLY"};
 const timeframeLabel = {SHORT_TERM: "DAY TRADING", MEDIUM_LONG_TERM: "WEEKLY TRADING", LONG_TERM: "3+ MONTHS"};
-const modeConfig = {hourly: {file: "data/market-opportunities-hourly-latest.json", title: "DAY TRADING", eyebrow: "NEXT HOURLY REVIEW"}, daily: {file: "data/market-opportunities-daily-latest.json", title: "WEEKLY TRADING", eyebrow: "NEXT WEEKLY REVIEW"}};
+const modeConfig = {hourly: {file: "data/market-opportunities-hourly-latest.json", title: "DAY TRADING", eyebrow: "NEXT HOURLY REVIEW", interval: 60, historyLabel: "hourly"}, daily: {file: "data/market-opportunities-daily-latest.json", title: "WEEKLY TRADING", eyebrow: "NEXT WEEKLY REVIEW", interval: 1440, historyLabel: "daily"}, "long-term": {file: "data/market-opportunities-long-term-latest.json", title: "3+ MONTHS", eyebrow: "NEXT LONG-TERM REVIEW", interval: 1440, historyLabel: "daily"}};
 
 function card(item) {
   const metrics = item.metrics || {};
@@ -44,14 +44,7 @@ function renderSocial(social) {
 }
 
 function renderLongTerm() {
-  snapshot = null;
-  $("#scan-status").textContent = "WATCHLIST ONLY";
-  $("#scan-summary").textContent = "Three-month-plus horizon · no long-term directional model is enabled yet.";
-  $("#opportunities").innerHTML = `<div class="panel"><strong>Long-term watchlist only</strong><p class="muted">This horizon needs thesis, fundamentals, tokenomics, and catalyst review. The app will not convert a 24-hour price move into a three-month signal.</p></div>`;
-  $("#refresh-button").disabled = true;
-  $("#refresh-button").textContent = "Quick scan unavailable";
-  $("#deep-scan-button").disabled = true;
-  $("#deep-scan-button").textContent = "Deep scan unavailable";
+  return boot();
 }
 
 async function refreshLiveQuotes() {
@@ -101,7 +94,7 @@ function rebuildPriceMap(item) {
 }
 
 async function runDeepScan() {
-  if (activeMode === "long-term" || !snapshot?.candidates?.length) return;
+  if (!snapshot?.candidates?.length) return;
   const button = $("#deep-scan-button");
   button.disabled = true; $("#refresh-button").disabled = true; button.textContent = "Scanning history…"; $("#scan-status").textContent = "DEEP SCANNING";
   try {
@@ -116,10 +109,10 @@ async function runDeepScan() {
     let completed = 0;
     await Promise.all(snapshot.candidates.map(async item => {
       const pair = encodeURIComponent(pairForSymbol[String(item.symbol || "").toUpperCase()] || item.pair_key || item.symbol);
-      const response = await fetch(`https://api.kraken.com/0/public/OHLC?pair=${pair}&interval=60`, {cache: "no-store"});
+      const response = await fetch(`https://api.kraken.com/0/public/OHLC?pair=${pair}&interval=${modeConfig[activeMode].interval}`, {cache: "no-store"});
       const result = await response.json();
       const rows = Object.values(result.result || {}).find(value => Array.isArray(value)) || [];
-      const recent = rows.slice(-24);
+      const recent = rows.slice(activeMode === "hourly" ? -24 : -90);
       const closes = recent.map(row => Number(row[4])).filter(Number.isFinite);
       const highs = recent.map(row => Number(row[2])).filter(Number.isFinite);
       const lows = recent.map(row => Number(row[3])).filter(Number.isFinite);
@@ -134,7 +127,7 @@ async function runDeepScan() {
     snapshot.deep_scan_updated_at_utc = new Date().toISOString();
     render();
     $("#scan-status").textContent = "DEEP SCAN COMPLETE";
-    $("#scan-summary").textContent += ` · Deep scan refreshed ${completed}/${snapshot.candidates.length} hourly histories and rebuilt range levels.`;
+    $("#scan-summary").textContent += ` · Deep scan refreshed ${completed}/${snapshot.candidates.length} ${modeConfig[activeMode].historyLabel} histories and rebuilt range levels.`;
   } catch (error) { $("#scan-status").textContent = "DEEP SCAN FAILED"; $("#scan-summary").textContent = `Deep scan could not complete: ${error.message}`; }
   finally { button.disabled = false; $("#refresh-button").disabled = false; button.textContent = "Deep scan"; }
 }
@@ -172,7 +165,7 @@ async function analyze(query) {
 }
 
 async function boot({manual = false} = {}) {
-  if (activeMode === "long-term") { renderLongTerm(); return; }
+  if (!modeConfig[activeMode]) { activeMode = "hourly"; }
   $("#deep-scan-button").disabled = false; $("#deep-scan-button").textContent = "Deep scan";
   const button = $("#refresh-button");
   button.disabled = true; button.textContent = "Refreshing…";
