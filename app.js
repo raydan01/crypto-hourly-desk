@@ -56,16 +56,17 @@ async function analyze(query) {
   } catch (error) { result.innerHTML = `<p class="muted">${escapeHtml(error.message)}. Try a Kraken symbol such as BTC or ETH.</p>`; $("#search-status").textContent = "Search unavailable."; }
 }
 
-async function boot() {
+async function boot({manual = false} = {}) {
   const button = $("#refresh-button");
   button.disabled = true; button.textContent = "Refreshing…";
   $("#scan-status").textContent = "REFRESHING";
-  try { snapshot = await fetch(`data/market-opportunities-hourly-latest.json?ts=${Date.now()}`, {cache:"no-store"}).then(r => r.json()); render(); }
+  const previousTimestamp = snapshot?.generated_at_utc;
+  try { snapshot = await fetch(`data/market-opportunities-hourly-latest.json?ts=${Date.now()}`, {cache:"no-store"}).then(r => r.json()); render(); if (manual && previousTimestamp && previousTimestamp === snapshot.generated_at_utc) { $("#scan-status").textContent = "CURRENT HOURLY"; $("#scan-summary").textContent += " · No newer hourly snapshot yet; the scheduled scan has not published a new result."; } }
   catch (error) { $("#scan-status").textContent = "UNAVAILABLE"; $("#scan-summary").textContent = "Hourly snapshot unavailable. Try Refresh scan again."; }
   finally { button.disabled = false; button.textContent = "Refresh scan"; }
 }
 $("#search-button").addEventListener("click", () => analyze($("#coin-search").value));
 $("#coin-search").addEventListener("keydown", event => { if (event.key === "Enter") analyze(event.target.value); });
-$("#refresh-button").addEventListener("click", boot);
+$("#refresh-button").addEventListener("click", () => boot({manual: true}));
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("service-worker.js").catch(() => {});
 boot();
