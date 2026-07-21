@@ -84,8 +84,6 @@ def build_snapshot() -> dict:
     discovery = [item for item in scan["candidates"] if item["symbol"] not in watched_symbols and item["symbol"] not in NON_CRYPTO_SYMBOLS]
     selected_watched = watched[:16]
     selected_discovery = discovery[:4]
-    if len(selected_watched) < 16:
-        selected_discovery = discovery[: 20 - len(selected_watched)]
     for item in selected_watched:
         item["universe_bucket"] = "WATCHLIST"
     for item in selected_discovery:
@@ -93,8 +91,31 @@ def build_snapshot() -> dict:
     selected = selected_watched + selected_discovery
     focused_scan = {**scan, "candidates": selected}
     payload = build_opportunity_payload(focused_scan, generated_at_utc=captured, cadence="hourly")
-    payload["selection_policy"] = "16 highest-ranked watched coins plus 4 highest-ranked non-watchlist coins; quality filters may reduce the watched count"
-    payload["selection_counts"] = {"watchlist_requested": 16, "watchlist_selected": len(selected_watched), "discovery_requested": 4, "discovery_selected": len(selected_discovery)}
+    selected_symbols = {item["symbol"] for item in selected}
+    rejected_watchlist = [item for item in scan.get("rejections", []) if str(item.get("symbol") or "").upper() in watched_symbols and str(item.get("symbol") or "").upper() not in selected_symbols]
+    for rejection in rejected_watchlist[: max(0, 16 - len(selected_watched))]:
+        symbol = str(rejection["symbol"]).upper()
+        source = next((row for row in captured_rows if row["symbol"] == symbol), {})
+        extra = {
+            "symbol": symbol,
+            "rank_score": 0,
+            "rank": len(payload["candidates"]) + 1,
+            "bias": "AVOID",
+            "timeframe": "SHORT_TERM",
+            "metrics": {"last": source.get("last"), "bid": source.get("bid"), "ask": source.get("ask"), "change_24h_pct": source.get("change_24h_pct"), "spread_bps": rejection.get("metrics", {}).get("spread_bps"), "volume_24h_quote": source.get("volume_24h_quote"), "volatility_24h": source.get("volatility_24h")},
+            "margin_status": "unknown",
+            "avoid_reason": rejection.get("reason", "QUALITY_SCREEN_REJECTED"),
+            "universe_bucket": "WATCHLIST",
+            "research_only": True,
+            "trade_authorization": False,
+            "execution_allowed": False,
+            "explanation": {"market_quality": "failed one or more scan safeguards", "reason": rejection.get("reason", "QUALITY_SCREEN_REJECTED"), "quick_reason": "Watched coin retained for monitoring, but it did not pass the hourly quality screen."},
+            "price_map": None,
+        }
+        payload["candidates"].append(extra)
+    payload["candidates"] = [item for item in payload["candidates"] if item.get("universe_bucket") == "WATCHLIST"] + [item for item in payload["candidates"] if item.get("universe_bucket") == "DISCOVERY"]
+    payload["selection_counts"] = {"watchlist_requested": 16, "watchlist_selected": min(16, len(selected_watched) + len(rejected_watchlist[: max(0, 16 - len(selected_watched))])), "discovery_requested": 4, "discovery_selected": len(selected_discovery)}
+    payload["selection_policy"] = "16 highest-ranked watched coins plus 4 highest-ranked non-watchlist coins; failed watched coins remain visible as AVOID"
     return payload
 
 
