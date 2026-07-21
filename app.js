@@ -15,9 +15,10 @@ function card(item) {
 function render() {
   const choices = (snapshot.opportunities || []).slice(0, 6);
   const avoids = (snapshot.avoids || []).filter(item => item.bias === "AVOID").slice(0, 2);
+  const bearish = (snapshot.candidates || []).filter(item => Number(item.metrics?.change_24h_pct) <= -0.5).length;
   $("#scan-status").textContent = snapshot.status === "READY" ? "FRESH HOURLY" : String(snapshot.status || "NOT READY").replaceAll("_", " ");
   $("#scan-summary").textContent = `${choices.length} setup${choices.length === 1 ? "" : "s"} cleared the latest Kraken quality screen · captured ${new Date(snapshot.generated_at_utc).toLocaleString()} · ${avoids.length} shown as avoid.`;
-  $("#opportunities").innerHTML = choices.length ? choices.map(card).join("") : `<div class="panel"><strong>No LONG/SHORT setup cleared this hour.</strong><p class="muted">${avoids.length} screened markets remain avoid/watch only.</p></div>`;
+  $("#opportunities").innerHTML = choices.length ? choices.map(card).join("") : `<div class="panel"><strong>No LONG setup cleared this hour.</strong><p class="muted">${bearish} bearish market${bearish === 1 ? " was" : "s were"} screened, but SHORT research is blocked because Kraken margin permission is not verified. The scanner is working and remains fail-closed.</p></div>`;
 }
 
 async function analyze(query) {
@@ -53,10 +54,15 @@ async function analyze(query) {
 }
 
 async function boot() {
+  const button = $("#refresh-button");
+  button.disabled = true; button.textContent = "Refreshing…";
+  $("#scan-status").textContent = "REFRESHING";
   try { snapshot = await fetch(`data/market-opportunities-hourly-latest.json?ts=${Date.now()}`, {cache:"no-store"}).then(r => r.json()); render(); }
-  catch (error) { $("#scan-status").textContent = "UNAVAILABLE"; $("#scan-summary").textContent = "Hourly snapshot unavailable. Upload a fresh data artifact before relying on this screen."; }
+  catch (error) { $("#scan-status").textContent = "UNAVAILABLE"; $("#scan-summary").textContent = "Hourly snapshot unavailable. Try Refresh scan again."; }
+  finally { button.disabled = false; button.textContent = "Refresh scan"; }
 }
 $("#search-button").addEventListener("click", () => analyze($("#coin-search").value));
 $("#coin-search").addEventListener("keydown", event => { if (event.key === "Enter") analyze(event.target.value); });
+$("#refresh-button").addEventListener("click", boot);
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("service-worker.js").catch(() => {});
 boot();

@@ -21,3 +21,11 @@ def test_mobile_package_contains_no_private_dashboard_assets():
     names = {path.name for path in ROOT.iterdir()}
     assert "portfolio-projection-latest.json" not in names
     assert "risk-latest.json" not in names
+
+
+def test_mobile_desk_has_manual_refresh_and_explains_fail_closed_empty_state():
+    html = (ROOT / "index.html").read_text(encoding="utf-8")
+    app = (ROOT / "app.js").read_text(encoding="utf-8")
+    assert 'id="refresh-button"' in html
+    assert 'addEventListener("click", boot)' in app
+    assert "remains fail-closed" in app
