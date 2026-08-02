@@ -3,16 +3,18 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+ROOT = Path(__file__).parent
+sys.path.append(str(ROOT.parent))
 from research.market_opportunities import build_opportunity_payload, realized_volatility
 from research.market_scanner import scan_markets
 from social_context import build_social_context
 
-ROOT = Path(__file__).parent
 OUTPUT = ROOT / "data" / "market-opportunities-hourly-latest.json"
 WATCHLIST = ROOT / "data" / "watchlist.json"
 API = "https://api.kraken.com/0/public"
@@ -72,7 +74,7 @@ def build_snapshot(cadence: str = "hourly") -> dict:
             continue
         ranked.append((volume * last, symbol, pair, bid, ask, last, volume, opening, high, low, volatility))
     ranked.sort(reverse=True)
-    captured_rows = [{"symbol": symbol, "observed_at_utc": captured, "bid": bid, "ask": ask, "last": last, "high_24h": high, "low_24h": low, "volume_24h_quote": volume * last, "volatility_24h": volatility, "change_24h_pct": ((last / opening) - 1) * 100 if opening and opening > 0 else None, "pair_key": pair["pair_key"], "margin_status": "unknown"} for _, symbol, pair, bid, ask, last, volume, opening, high, low, volatility in ranked[:1000]]
+    captured_rows = [{"symbol": symbol, "observed_at_utc": captured, "retrieved_at_utc": captured, "quote_source": "Kraken public Ticker", "quote_pair": pair["pair_key"], "bid": bid, "ask": ask, "last": last, "high_24h": high, "low_24h": low, "volume_24h_quote": volume * last, "volatility_24h": volatility, "change_24h_pct": ((last / opening) - 1) * 100 if opening and opening > 0 else None, "pair_key": pair["pair_key"], "margin_status": "unknown"} for _, symbol, pair, bid, ask, last, volume, opening, high, low, volatility in ranked[:1000]]
     scan = scan_markets(list(pairs), captured_rows, observed_at_utc=captured)
     for candidate in scan.get("candidates", []):
         source = next((row for row in captured_rows if row["symbol"] == candidate["symbol"]), {})
@@ -107,6 +109,7 @@ def build_snapshot(cadence: str = "hourly") -> dict:
             "confidence_band": "LOW",
             "score_breakdown": {"score": 0, "band": "LOW", "bias": "AVOID", "market_score": 0, "social_score": 0, "market_direction": 0, "social_direction": 0, "combined_direction": 0, "social_sources": []},
             "timeframe": "SHORT_TERM",
+            "pair_key": source.get("pair_key"),
             "metrics": {"last": source.get("last"), "bid": source.get("bid"), "ask": source.get("ask"), "change_24h_pct": source.get("change_24h_pct"), "spread_bps": rejection.get("metrics", {}).get("spread_bps"), "volume_24h_quote": source.get("volume_24h_quote"), "volatility_24h": source.get("volatility_24h")},
             "margin_status": "unknown",
             "avoid_reason": rejection.get("reason", "QUALITY_SCREEN_REJECTED"),
@@ -126,6 +129,14 @@ def build_snapshot(cadence: str = "hourly") -> dict:
     payload["selection_policy"] = "16 highest-ranked watched coins plus 4 highest-ranked non-watchlist coins; failed watched coins remain visible as AVOID"
     payload["social_context"] = social
     payload["social_context_status"] = payload["social_context"].get("status", "NO_DATA")
+    payload["market_data_source"] = "Kraken public Ticker"
+    payload["market_data_captured_at_utc"] = captured
+    payload["market_data_max_age_seconds"] = 120
+    payload["freshness_contract"] = {"required_source": "Kraken public Ticker", "quote_max_age_seconds": 120, "all_candidates_required": True, "derived_fields_require_fresh_quote": True}
+    for item in payload["candidates"]:
+        item["market_data_source"] = "Kraken public Ticker"
+        item["market_data_captured_at_utc"] = captured
+        item["market_data_max_age_seconds"] = 120
     return payload
 
 
