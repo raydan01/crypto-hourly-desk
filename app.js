@@ -1,7 +1,7 @@
 const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? "").replace(/[&<>\"]/g, character => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[character]));
 const price = value => value == null ? "n/a" : Number(value).toLocaleString(undefined, { maximumSignificantDigits: 8 });
-const APP_BUILD_ID = "freshness-gate-v1";
+const APP_BUILD_ID = "short-research-v1";
 const MAX_LIVE_QUOTE_AGE_SECONDS = 120;
 let snapshot = null;
 let activeMode = "hourly";
@@ -76,7 +76,8 @@ function card(item) {
   const biasKey = String(item.bias || "WATCH");
   const bias = biasLabel[biasKey] || biasKey.replaceAll("_", " ");
   const tone = bias.includes("LONG") ? "long" : bias.includes("SHORT") ? "short" : "avoid";
-  const setup = map ? `<div class="setup"><div><span>Entry zone</span><strong>${price(map.entry_low)} – ${price(map.entry_high)}</strong></div><div><span>Invalidation</span><strong>${price(map.invalidation)}</strong></div><div><span>Target 1</span><strong>${price(map.target_one)}</strong></div><div><span>Target 2</span><strong>${price(map.target_two)}</strong></div></div>` : "";
+  const mapNotice = map?.side === "SHORT_RESEARCH" && item.margin_status !== "verified_enabled" ? `<small class="map-note">BEARISH RESEARCH MAP — MONITORING ONLY; margin permission is not verified.</small>` : "";
+  const setup = map ? `<div class="setup"><div><span>Entry zone</span><strong>${price(map.entry_low)} – ${price(map.entry_high)}</strong></div><div><span>Invalidation</span><strong>${price(map.invalidation)}</strong></div><div><span>Target 1</span><strong>${price(map.target_one)}</strong></div><div><span>Target 2</span><strong>${price(map.target_two)}</strong></div>${mapNotice}</div>` : "";
   return `<article class="card"><div class="card-top"><span class="symbol">${escapeHtml(item.symbol)}</span><span class="bias ${tone}">${escapeHtml(bias)}</span></div><div class="card-meta">#${item.rank || "-"} · ${escapeHtml(timeframeLabel[item.timeframe] || item.timeframe || "INTRADAY")} · margin ${escapeHtml(item.margin_status || "unknown")}</div><div class="score-row"><strong>${Number(item.opportunity_score || 0).toFixed(0)}/100</strong><span>${escapeHtml(item.confidence_band || "LOW")} confidence</span></div><p class="reason">${escapeHtml(item.explanation?.quick_reason || item.avoid_reason || "Quality screen result")}</p><div class="metrics"><div class="metric"><span>Live price</span><strong>${price(metrics.last)}</strong></div><div class="metric"><span>24h change</span><strong>${metrics.change_24h_pct == null ? "n/a" : Number(metrics.change_24h_pct).toFixed(2) + "%"}</strong></div><div class="metric"><span>Spread</span><strong>${metrics.spread_bps == null ? "n/a" : Number(metrics.spread_bps).toFixed(2) + " bps"}</strong></div></div>${setup}</article>`;
 }
 
@@ -197,10 +198,16 @@ function rebuildPriceMap(item) {
   const last = Number(metrics.last); const high = Number(metrics.high_24h); const low = Number(metrics.low_24h);
   if (![last, high, low].every(value => Number.isFinite(value) && value > 0) || high < low || last < low || last > high) { item.price_map = null; item.price_map_status = "INVALID_FRESH_RANGE"; return; }
   const range = Math.max(high - low, last * 0.005);
-  if (item.bias === "LONG_RESEARCH") item.price_map = {side: "LONG_RESEARCH", entry_low: Math.max(low, last - range * 0.35), entry_high: last, invalidation: Math.max(0, low - range * 0.25), target_one: last + range * 0.5, target_two: last + range, method: "24-hour range pullback and extension map"};
-  else if (item.bias === "SHORT_RESEARCH" && item.margin_status === "verified_enabled") item.price_map = {side: "SHORT_RESEARCH", entry_low: last, entry_high: last + range * 0.35, invalidation: high + range * 0.25, target_one: Math.max(0, last - range * 0.5), target_two: Math.max(0, last - range), method: "fresh Kraken 24-hour range rejection and extension map"};
-  else item.price_map = null;
-  item.price_map_status = item.price_map ? "FRESH" : "NONE";
+  if (item.bias === "LONG_RESEARCH") {
+    item.price_map = {side: "LONG_RESEARCH", entry_low: Math.max(low, last - range * 0.35), entry_high: last, invalidation: Math.max(0, low - range * 0.25), target_one: last + range * 0.5, target_two: last + range, method: "24-hour range pullback and extension map"};
+    item.price_map_status = "FRESH";
+  } else if (item.bias === "SHORT_RESEARCH") {
+    item.price_map = {side: "SHORT_RESEARCH", entry_low: last, entry_high: last + range * 0.35, invalidation: high + range * 0.25, target_one: Math.max(0, last - range * 0.5), target_two: Math.max(0, last - range), method: "fresh Kraken 24-hour range rejection and extension map"};
+    item.price_map_status = item.margin_status === "verified_enabled" ? "FRESH" : "FRESH_RESEARCH_ONLY";
+  } else {
+    item.price_map = null;
+    item.price_map_status = "NONE";
+  }
 }
 
 function recalculateLiveRanking() {
@@ -228,7 +235,7 @@ function recalculateLiveRanking() {
     const score = Number((marketScore * 0.70 + socialScore * 0.30).toFixed(2));
     item.opportunity_score = score;
     item.confidence_band = score >= 70 ? "HIGH" : score >= 45 ? "MODERATE" : "LOW";
-    item.bias = combinedDirection >= 0.25 ? "LONG_RESEARCH" : combinedDirection <= -0.25 && item.margin_status === "verified_enabled" ? "SHORT_RESEARCH" : "AVOID";
+    item.bias = combinedDirection >= 0.25 ? "LONG_RESEARCH" : combinedDirection <= -0.25 ? "SHORT_RESEARCH" : "AVOID";
     item.score_breakdown = {...(item.score_breakdown || {}), score, band: item.confidence_band, bias: item.bias, market_score: Number(marketScore.toFixed(2)), social_score: Number(socialScore.toFixed(2)), combined_direction: Number(combinedDirection.toFixed(4))};
     item.explanation = {...(item.explanation || {}), directional_change_24h_pct: change, quick_reason: item.bias === "LONG_RESEARCH" ? "Fresh Kraken quote passed the bullish research threshold." : item.bias === "SHORT_RESEARCH" ? "Fresh Kraken quote passed the bearish research threshold; short execution remains permission-gated." : "Fresh Kraken quote did not clear the directional research threshold."};
     rebuildPriceMap(item);
