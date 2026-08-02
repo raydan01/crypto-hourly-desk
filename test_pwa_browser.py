@@ -42,14 +42,36 @@ def main() -> None:
             page.goto("http://127.0.0.1:8765", wait_until="networkidle")
             page.wait_for_function("document.querySelector('#scan-status')?.textContent !== 'REFRESHING'", timeout=90000)
             page.wait_for_timeout(1000)
-            status = page.locator("#scan-status").inner_text()
-            summary = page.locator("#scan-summary").inner_text()
+            priority = {"BULLISH SETUP": 0, "BEARISH SETUP": 1, "WATCH ONLY": 2}
+
+            def inspect_mode(mode: str) -> dict:
+                if mode != "hourly":
+                    page.locator(f'[data-mode="{mode}"]').click()
+                    page.wait_for_function("document.querySelector('#scan-status')?.textContent !== 'REFRESHING'", timeout=90000)
+                    page.wait_for_timeout(500)
+                status = page.locator("#scan-status").inner_text()
+                summary = page.locator("#scan-summary").inner_text()
+                cards = page.locator("#opportunities .card")
+                biases = page.locator("#opportunities .bias").all_inner_texts()
+                bias_order = [priority.get(value, 3) for value in biases]
+                stale_count = page.get_by_text("DATA STALE", exact=False).count()
+                return {
+                    "status": status,
+                    "summary": summary,
+                    "card_count": cards.count(),
+                    "biases": biases,
+                    "bias_order": bias_order,
+                    "stale_count": stale_count,
+                }
+
+            modes = {mode: inspect_mode(mode) for mode in ("hourly", "daily", "long-term")}
+            status = modes["hourly"]["status"]
             cards = page.locator("#opportunities .card")
-            stale_count = page.get_by_text("DATA STALE", exact=False).count()
+            stale_count = modes["hourly"]["stale_count"]
             body_text = page.locator("body").inner_text()
             result = {
                 "status": status,
-                "summary": summary,
+                "modes": modes,
                 "card_count": cards.count(),
                 "stale_count": stale_count,
                 "console_errors": console_errors,
@@ -58,9 +80,11 @@ def main() -> None:
                 "contains_live_price": "Live price" in body_text,
             }
             print(json.dumps(result, indent=2))
-            assert status.startswith("FRESH"), result
-            assert cards.count() == 20, result
-            assert stale_count == 0, result
+            for mode_result in modes.values():
+                assert mode_result["status"].startswith("FRESH"), result
+                assert mode_result["card_count"] == 20, result
+                assert mode_result["bias_order"] == sorted(mode_result["bias_order"]), result
+                assert mode_result["stale_count"] == 0, result
             assert result["contains_ada"] and result["contains_live_price"], result
             assert not console_errors and not page_errors, result
             browser.close()

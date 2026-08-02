@@ -80,6 +80,20 @@ function card(item) {
   return `<article class="card"><div class="card-top"><span class="symbol">${escapeHtml(item.symbol)}</span><span class="bias ${tone}">${escapeHtml(bias)}</span></div><div class="card-meta">#${item.rank || "-"} · ${escapeHtml(timeframeLabel[item.timeframe] || item.timeframe || "INTRADAY")} · margin ${escapeHtml(item.margin_status || "unknown")}</div><div class="score-row"><strong>${Number(item.opportunity_score || 0).toFixed(0)}/100</strong><span>${escapeHtml(item.confidence_band || "LOW")} confidence</span></div><p class="reason">${escapeHtml(item.explanation?.quick_reason || item.avoid_reason || "Quality screen result")}</p><div class="metrics"><div class="metric"><span>Live price</span><strong>${price(metrics.last)}</strong></div><div class="metric"><span>24h change</span><strong>${metrics.change_24h_pct == null ? "n/a" : Number(metrics.change_24h_pct).toFixed(2) + "%"}</strong></div><div class="metric"><span>Spread</span><strong>${metrics.spread_bps == null ? "n/a" : Number(metrics.spread_bps).toFixed(2) + " bps"}</strong></div></div>${setup}</article>`;
 }
 
+const displayPriority = {LONG_RESEARCH: 0, SHORT_RESEARCH: 1, AVOID: 2};
+
+function orderDisplayChoices(items) {
+  return items.map((item, index) => ({item, index})).sort((left, right) => {
+    const leftPriority = displayPriority[left.item.bias] ?? 3;
+    const rightPriority = displayPriority[right.item.bias] ?? 3;
+    if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+    const leftRank = Number(left.item.rank);
+    const rightRank = Number(right.item.rank);
+    if (Number.isFinite(leftRank) && Number.isFinite(rightRank) && leftRank !== rightRank) return leftRank - rightRank;
+    return left.index - right.index;
+  }).map(entry => entry.item);
+}
+
 function render() {
   const freshness = liveFreshness();
   if (!freshness.ok) {
@@ -87,7 +101,7 @@ function render() {
     return;
   }
   const allChoices = snapshot.candidates || [];
-  const choices = (activeDirection === "all" ? allChoices : allChoices.filter(item => item.bias === activeDirection)).slice(0, 20);
+  const choices = orderDisplayChoices(activeDirection === "all" ? allChoices : allChoices.filter(item => item.bias === activeDirection)).slice(0, 20);
   const setupCount = (snapshot.opportunities || []).length;
   const avoids = (snapshot.avoids || []).filter(item => item.bias === "AVOID").slice(0, 2);
   const bearish = (snapshot.candidates || []).filter(item => item.bias === "SHORT_RESEARCH").length;
