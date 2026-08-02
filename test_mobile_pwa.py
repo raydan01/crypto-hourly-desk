@@ -77,6 +77,8 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     assert "recalculateLiveRanking" in app
     assert "social/news artifact captured" in app
     assert "const allChoices = snapshot.candidates || []" in app
+    assert "const displayPriority = {LONG_RESEARCH: 0, SHORT_RESEARCH: 1, AVOID: 2}" in app
+    assert "orderDisplayChoices" in app
     assert "market-opportunities-long-term-latest.json" in app
     assert "interval=${modeConfig[activeMode].interval}" in app
 

@@ -96,6 +96,7 @@ def build_snapshot(cadence: str = "hourly") -> dict:
     social = build_social_context()
     payload = build_opportunity_payload(focused_scan, generated_at_utc=captured, cadence=cadence, social_context=social)
     selected_symbols = {item["symbol"] for item in selected}
+    schedule_timeframe = {"hourly": "SHORT_TERM", "daily": "MEDIUM_LONG_TERM", "long-term": "LONG_TERM"}.get(cadence, "SHORT_TERM")
     rejected_watchlist = [item for item in scan.get("rejections", []) if str(item.get("symbol") or "").upper() in watched_symbols and str(item.get("symbol") or "").upper() not in selected_symbols]
     for rejection in rejected_watchlist[: max(0, 16 - len(selected_watched))]:
         symbol = str(rejection["symbol"]).upper()
@@ -108,7 +109,7 @@ def build_snapshot(cadence: str = "hourly") -> dict:
             "opportunity_score": 0,
             "confidence_band": "LOW",
             "score_breakdown": {"score": 0, "band": "LOW", "bias": "AVOID", "market_score": 0, "social_score": 0, "market_direction": 0, "social_direction": 0, "combined_direction": 0, "social_sources": []},
-            "timeframe": "SHORT_TERM",
+            "timeframe": schedule_timeframe,
             "pair_key": source.get("pair_key"),
             "metrics": {"last": source.get("last"), "bid": source.get("bid"), "ask": source.get("ask"), "change_24h_pct": source.get("change_24h_pct"), "spread_bps": rejection.get("metrics", {}).get("spread_bps"), "volume_24h_quote": source.get("volume_24h_quote"), "volatility_24h": source.get("volatility_24h")},
             "margin_status": "unknown",
