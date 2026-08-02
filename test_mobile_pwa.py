@@ -79,6 +79,9 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     assert "const allChoices = snapshot.candidates || []" in app
     assert "const displayPriority = {LONG_RESEARCH: 0, SHORT_RESEARCH: 1, AVOID: 2}" in app
     assert "orderDisplayChoices" in app
+    assert 'item.bias = combinedDirection >= 0.25 ? "LONG_RESEARCH" : combinedDirection <= -0.25 ? "SHORT_RESEARCH" : "AVOID";' in app
+    assert "FRESH_RESEARCH_ONLY" in app
+    assert "BEARISH RESEARCH MAP" in app
     assert "market-opportunities-long-term-latest.json" in app
     assert "interval=${modeConfig[activeMode].interval}" in app
 
@@ -98,7 +101,7 @@ def test_mobile_desk_has_fail_closed_freshness_contract():
     assert "fetchFreshJson(`https://api.kraken.com/0/public/Ticker" in app
     assert "Kraken returned an invalid USD quote range" in app
     assert 'item.margin_status === "verified_enabled"' in app
-    assert "crypto-hourly-desk-v6-freshness" in worker
+    assert "crypto-hourly-desk-v7-short-research" in worker
     assert "caches.delete(key)" in worker
     assert '"market_data_source"' in refresh
     assert '"freshness_contract"' in refresh

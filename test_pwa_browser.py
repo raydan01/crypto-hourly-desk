@@ -60,18 +60,25 @@ def main() -> None:
                     "summary": summary,
                     "card_count": cards.count(),
                     "biases": biases,
+                    "short_count": biases.count("BEARISH SETUP"),
                     "bias_order": bias_order,
                     "stale_count": stale_count,
                 }
 
             modes = {mode: inspect_mode(mode) for mode in ("hourly", "daily", "long-term")}
+            body_text = page.locator("body").inner_text()
+            page.locator('[data-direction="SHORT_RESEARCH"]').click()
+            page.wait_for_timeout(250)
+            short_summary = page.locator("#scan-summary").inner_text()
+            short_biases = page.locator("#opportunities .bias").all_inner_texts()
             status = modes["hourly"]["status"]
             cards = page.locator("#opportunities .card")
             stale_count = modes["hourly"]["stale_count"]
-            body_text = page.locator("body").inner_text()
             result = {
                 "status": status,
                 "modes": modes,
+                "short_tab_summary": short_summary,
+                "short_tab_biases": short_biases,
                 "card_count": cards.count(),
                 "stale_count": stale_count,
                 "console_errors": console_errors,
@@ -86,6 +93,8 @@ def main() -> None:
                 assert mode_result["bias_order"] == sorted(mode_result["bias_order"]), result
                 assert mode_result["stale_count"] == 0, result
             assert result["contains_ada"] and result["contains_live_price"], result
+            assert "short opportunities" in result["short_tab_summary"], result
+            assert all(value == "BEARISH SETUP" for value in result["short_tab_biases"]), result
             assert not console_errors and not page_errors, result
             browser.close()
     finally:
