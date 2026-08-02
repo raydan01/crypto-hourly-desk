@@ -1,10 +1,11 @@
 import json
+import sys
 from pathlib import Path
 
+ROOT = Path(__file__).parent
+sys.path.insert(0, str(ROOT))
 from research.market_opportunities import score_candidate
 
-
-ROOT = Path(__file__).parent
 
 
 def test_social_context_can_change_neutral_market_direction_and_score_is_bounded():
@@ -78,3 +79,31 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     assert "const allChoices = snapshot.candidates || []" in app
     assert "market-opportunities-long-term-latest.json" in app
     assert "interval=${modeConfig[activeMode].interval}" in app
+
+
+def test_mobile_desk_has_fail_closed_freshness_contract():
+    app = (ROOT / "app.js").read_text(encoding="utf-8")
+    worker = (ROOT / "service-worker.js").read_text(encoding="utf-8")
+    refresh = (ROOT / "refresh_hourly.py").read_text(encoding="utf-8")
+    assert "MAX_LIVE_QUOTE_AGE_SECONDS = 120" in app
+    assert "DATA STALE" in app
+    assert "live_quote_complete" in app
+    assert "live_quote_failed_symbols" in app
+    assert "last < low || last > high" in app
+    assert "function buildUsdPairMap" in app
+    assert 'if (quote !== "USD") continue' in app
+    assert "const freshness = liveFreshness()" in app
+    assert "fetchFreshJson(`https://api.kraken.com/0/public/Ticker" in app
+    assert "Kraken returned an invalid USD quote range" in app
+    assert 'item.margin_status === "verified_enabled"' in app
+    assert "crypto-hourly-desk-v6-freshness" in worker
+    assert "caches.delete(key)" in worker
+    assert '"market_data_source"' in refresh
+    assert '"freshness_contract"' in refresh
+
+
+def test_installed_refresh_wrappers_update_mobile_artifacts():
+    hourly = (ROOT.parent / "jobs" / "run_market_opportunities_hourly_hidden.vbs").read_text(encoding="utf-8")
+    daily = (ROOT.parent / "jobs" / "run_market_opportunities_daily_hidden.vbs").read_text(encoding="utf-8")
+    assert "mobile-pwa/refresh_hourly.py" in hourly.replace("\\", "/")
+    assert "mobile-pwa/refresh_daily.py" in daily.replace("\\", "/")
