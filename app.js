@@ -149,10 +149,19 @@ function renderLongTerm() {
   return boot();
 }
 
-async function refreshLiveQuotes(targetSnapshot = snapshot) {
+async function fetchLiveQuoteBatch(targetSnapshots) {
+  const pairs = await fetchFreshJson("https://api.kraken.com/0/public/AssetPairs");
+  const pairForSymbol = buildUsdPairMap(pairs.result);
+  const requested = [...new Set(targetSnapshots.flatMap(targetSnapshot => targetSnapshot.candidates.map(item => pairForSymbol[String(item.symbol || "").toUpperCase()]).filter(Boolean)))];
+  if (!requested.length) throw new Error("No Kraken USD spot pairs found for the candidate set");
+  const ticker = await fetchFreshJson(`https://api.kraken.com/0/public/Ticker?pair=${encodeURIComponent(requested.join(","))}`);
+  return {pairForSymbol, ticker, refreshedAt: new Date().toISOString()};
+}
+
+async function refreshLiveQuotes(targetSnapshot = snapshot, marketData = null) {
   if (!targetSnapshot?.candidates?.length) return 0;
   const expected = targetSnapshot.candidates.length;
-  const refreshStartedAt = new Date().toISOString();
+  const refreshStartedAt = marketData?.refreshedAt || new Date().toISOString();
   targetSnapshot.live_quote_expected_count = expected;
   targetSnapshot.live_quote_count = 0;
   targetSnapshot.live_quote_complete = false;
@@ -160,14 +169,9 @@ async function refreshLiveQuotes(targetSnapshot = snapshot) {
   targetSnapshot.live_quote_started_at_utc = refreshStartedAt;
   targetSnapshot.live_quote_failed_symbols = [];
   targetSnapshot.candidates.forEach(item => { item.live_quote_status = "PENDING"; });
-  const pairs = await fetchFreshJson("https://api.kraken.com/0/public/AssetPairs");
-  const pairForSymbol = buildUsdPairMap(pairs.result);
-  const requested = targetSnapshot.candidates.map(item => pairForSymbol[String(item.symbol || "").toUpperCase()]).filter(Boolean);
-  if (!requested.length) {
-    targetSnapshot.live_quote_failed_symbols = targetSnapshot.candidates.map(item => item.symbol).filter(Boolean);
-    return 0;
-  }
-  const ticker = await fetchFreshJson(`https://api.kraken.com/0/public/Ticker?pair=${encodeURIComponent(requested.join(","))}`);
+  const quoteData = marketData || await fetchLiveQuoteBatch([targetSnapshot]);
+  const pairForSymbol = quoteData.pairForSymbol;
+  const ticker = quoteData.ticker;
   let updated = 0;
   const failed = [];
   for (const item of targetSnapshot.candidates) {
@@ -292,9 +296,14 @@ async function refreshAllSnapshots() {
 }
 
 async function refreshAllLiveQuotes() {
+  const targets = Object.values(snapshotsByMode);
+  const marketData = await fetchLiveQuoteBatch(targets);
   const results = await Promise.all(Object.entries(snapshotsByMode).map(async ([mode, targetSnapshot]) => {
     try {
-      const count = await refreshLiveQuotes(targetSnapshot);
+      const count = await refreshLiveQuotes(targetSnapshot, marketData);
+  const results = await Promise.all(Object.entries(snapshotsByMode).map(async ([mode, targetSnapshot]) => {
+    try {
+      const count = await refreshLiveQuotes(targetSnapshot, marketData);
       if (!targetSnapshot.live_quote_complete || count !== targetSnapshot.live_quote_expected_count) throw new Error(`${count}/${targetSnapshot.live_quote_expected_count} complete`);
       recalculateLiveRanking(targetSnapshot);
       return {mode};
@@ -511,7 +520,7 @@ $("#search-button").addEventListener("click", () => analyze($("#coin-search").va
 $("#coin-search").addEventListener("keydown", event => { if (event.key === "Enter") analyze(event.target.value); });
 $("#refresh-button").addEventListener("click", () => boot({manual: true}));
 $("#deep-scan-button").addEventListener("click", runDeepScan);
-document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => { activeMode = tab.dataset.mode; document.querySelectorAll(".tab").forEach(item => { const selected = item === tab; item.classList.toggle("active", selected); item.setAttribute("aria-selected", String(selected)); }); $("#horizon-label").textContent = modeConfig[activeMode]?.eyebrow || "LONG-TERM HORIZON"; boot(); }));
+document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => { activeMode = tab.dataset.mode; document.querySelectorAll(".tab").forEach(item => { const selected = item === tab; item.classList.toggle("active", selected); item.setAttribute("aria-selected", String(selected)); }); $("#horizon-label").textContent = modeConfig[activeMode]?.eyebrow || "LONG-TERM HORIZON"; if (snapshotsByMode[activeMode] && liveFreshness(snapshotsByMode[activeMode]).ok) { snapshot = snapshotsByMode[activeMode]; render(); } else { boot(); } }));
 document.querySelectorAll(".direction-tab").forEach(tab => tab.addEventListener("click", () => { activeDirection = tab.dataset.direction; document.querySelectorAll(".direction-tab").forEach(item => item.classList.toggle("active", item === tab)); if (snapshot) render(); }));
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("service-worker.js").catch(() => {});
 boot();
