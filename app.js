@@ -301,6 +301,9 @@ async function refreshAllLiveQuotes() {
   const results = await Promise.all(Object.entries(snapshotsByMode).map(async ([mode, targetSnapshot]) => {
     try {
       const count = await refreshLiveQuotes(targetSnapshot, marketData);
+  const results = await Promise.all(Object.entries(snapshotsByMode).map(async ([mode, targetSnapshot]) => {
+    try {
+      const count = await refreshLiveQuotes(targetSnapshot, marketData);
       if (!targetSnapshot.live_quote_complete || count !== targetSnapshot.live_quote_expected_count) throw new Error(`${count}/${targetSnapshot.live_quote_expected_count} complete`);
       recalculateLiveRanking(targetSnapshot);
       return {mode};
