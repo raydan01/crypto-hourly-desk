@@ -139,7 +139,9 @@ function render() {
 function renderSocial(social) {
   const items = (social.items || []).slice(0, 10);
   const health = social.source_health || {};
-  $("#social-status").textContent = String(social.status || "NO DATA").replaceAll("_", " ");
+  const sourceStatuses = Object.values(health).map(value => String(value.status || "UNKNOWN").toUpperCase());
+  const hasDegradedSource = sourceStatuses.some(status => status !== "FRESH");
+  $("#social-status").textContent = hasDegradedSource ? "DEGRADED SOURCES" : String(social.status || "NO DATA").replaceAll("_", " ");
   $("#social-summary").textContent = items.length ? `${items.length} attention-ranked projects captured ${social.captured_at_utc ? new Date(social.captured_at_utc).toLocaleString() : ""}.` : "No social/news context was returned.";
   $("#social-health").innerHTML = Object.entries(health).map(([name, value]) => `<span>${escapeHtml(name.replaceAll("_", " "))}: <strong>${escapeHtml(value.status || "UNKNOWN")}${value.coverage == null ? "" : ` · ${Number(value.coverage).toFixed(0)}%`}</strong></span>`).join("");
   $("#social-items").innerHTML = items.length ? items.map(item => `<article class="social-item"><div><strong>${escapeHtml(item.symbol)}</strong><span>${escapeHtml(item.name)}</span></div><b>${Number(item.attention_score || 0).toFixed(0)} attention</b><small>CoinGecko #${item.rank} · News ${item.source_counts?.google_news || 0} · Reddit ${item.source_counts?.reddit || 0}</small></article>`).join("") : `<p class="muted">Social sources are unavailable or still refreshing.</p>`;

@@ -80,6 +80,7 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     assert "Live Kraken quotes updated" in app
     assert "runDeepScan" in app
     assert "renderSocial" in app
+    assert "DEGRADED SOURCES" in app
     assert "combined market + social score" in app
     assert "opportunity_score" in app
     assert "Top shorts" in html
