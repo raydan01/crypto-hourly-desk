@@ -71,6 +71,13 @@ def main() -> None:
             page.wait_for_timeout(250)
             short_summary = page.locator("#scan-summary").inner_text()
             short_biases = page.locator("#opportunities .bias").all_inner_texts()
+            page.locator('[data-direction="all"]').click()
+            page.locator("#deep-scan-button").click()
+            page.wait_for_function("!document.querySelector('#scan-status')?.textContent?.includes('DEEP SCANNING')", timeout=180000)
+            page.wait_for_timeout(500)
+            deep_status = page.locator("#scan-status").inner_text()
+            deep_summary = page.locator("#scan-summary").inner_text()
+            deep_card_count = page.locator("#opportunities .card").count()
             status = modes["hourly"]["status"]
             cards = page.locator("#opportunities .card")
             stale_count = modes["hourly"]["stale_count"]
@@ -79,6 +86,9 @@ def main() -> None:
                 "modes": modes,
                 "short_tab_summary": short_summary,
                 "short_tab_biases": short_biases,
+                "deep_status": deep_status,
+                "deep_summary": deep_summary,
+                "deep_card_count": deep_card_count,
                 "card_count": cards.count(),
                 "stale_count": stale_count,
                 "console_errors": console_errors,
@@ -95,6 +105,9 @@ def main() -> None:
             assert result["contains_ada"] and result["contains_live_price"], result
             assert "short opportunities" in result["short_tab_summary"], result
             assert all(value == "BEARISH SETUP" for value in result["short_tab_biases"]), result
+            assert result["deep_status"] in {"DEEP SCAN COMPLETE", "DEEP SCAN DEGRADED"}, result
+            assert "across all schedules" in result["deep_summary"], result
+            assert result["deep_card_count"] == 20, result
             assert not console_errors and not page_errors, result
             browser.close()
     finally:

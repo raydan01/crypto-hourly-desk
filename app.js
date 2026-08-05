@@ -1,9 +1,11 @@
 const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? "").replace(/[&<>\"]/g, character => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[character]));
 const price = value => value == null ? "n/a" : Number(value).toLocaleString(undefined, { maximumSignificantDigits: 8 });
-const APP_BUILD_ID = "short-research-v1";
+const APP_BUILD_ID = "full-refresh-v1";
 const MAX_LIVE_QUOTE_AGE_SECONDS = 120;
 let snapshot = null;
+let snapshotsByMode = {};
+let refreshFailures = [];
 let activeMode = "hourly";
 let activeDirection = "all";
 const biasLabel = {LONG_RESEARCH: "BULLISH SETUP", SHORT_RESEARCH: "BEARISH SETUP", AVOID: "WATCH ONLY"};
@@ -11,6 +13,7 @@ const timeframeLabel = {SHORT_TERM: "DAY TRADING", MEDIUM_LONG_TERM: "WEEKLY TRA
 const modeConfig = {hourly: {file: "data/market-opportunities-hourly-latest.json", title: "DAY TRADING", eyebrow: "NEXT HOURLY REVIEW", interval: 60, historyLabel: "hourly"}, daily: {file: "data/market-opportunities-daily-latest.json", title: "WEEKLY TRADING", eyebrow: "NEXT WEEKLY REVIEW", interval: 1440, historyLabel: "daily"}, "long-term": {file: "data/market-opportunities-long-term-latest.json", title: "3+ MONTHS", eyebrow: "NEXT LONG-TERM REVIEW", interval: 1440, historyLabel: "daily"}};
 const DEEP_SCAN_MIN_MS = 15000;
 const REQUEST_TIMEOUT_MS = 30000;
+const REQUEST_RETRY_DELAYS_MS = [300, 1000, 2500];
 
 function freshUrl(url) {
   return `${url}${url.includes("?") ? "&" : "?"}_fresh=${Date.now()}_${Math.random().toString(36).slice(2)}`;
@@ -28,15 +31,15 @@ function renderDataStale(reason) {
   $("#opportunities").innerHTML = `<div class="panel"><strong>DATA STALE — NO SIGNAL</strong><p class="muted">${escapeHtml(reason)}</p><p class="muted">Required: ${MAX_LIVE_QUOTE_AGE_SECONDS}-second maximum quote age, complete candidate coverage, and compatible fresh range data.</p></div>`;
 }
 
-function liveFreshness() {
-  if (!snapshot || !Array.isArray(snapshot.candidates) || !snapshot.candidates.length) return {ok: false, reason: "No market snapshot is loaded."};
-  const expected = Number(snapshot.live_quote_expected_count || snapshot.candidates.length);
-  const received = Number(snapshot.live_quote_count || 0);
-  const missing = snapshot.candidates.filter(item => item.live_quote_status !== "FRESH").map(item => item.symbol).filter(Boolean);
-  if (!snapshot.live_quote_complete || received !== expected || missing.length) {
+function liveFreshness(targetSnapshot = snapshot) {
+  if (!targetSnapshot || !Array.isArray(targetSnapshot.candidates) || !targetSnapshot.candidates.length) return {ok: false, reason: "No market snapshot is loaded."};
+  const expected = Number(targetSnapshot.live_quote_expected_count || targetSnapshot.candidates.length);
+  const received = Number(targetSnapshot.live_quote_count || 0);
+  const missing = targetSnapshot.candidates.filter(item => item.live_quote_status !== "FRESH").map(item => item.symbol).filter(Boolean);
+  if (!targetSnapshot.live_quote_complete || received !== expected || missing.length) {
     return {ok: false, reason: `Live Kraken quote refresh incomplete (${received}/${expected}); missing: ${missing.join(", ") || "unknown"}.`};
   }
-  const age = utcAgeSeconds(snapshot.live_quote_updated_at_utc);
+  const age = utcAgeSeconds(targetSnapshot.live_quote_updated_at_utc);
   if (age == null || age < -5 || age > MAX_LIVE_QUOTE_AGE_SECONDS) {
     return {ok: false, reason: `Live Kraken quote batch is ${age == null ? "undated" : `${Math.max(0, age).toFixed(0)} seconds old`}.`};
   }
@@ -44,15 +47,30 @@ function liveFreshness() {
 }
 
 async function fetchFreshJson(url, options = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeout || REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(freshUrl(url), {cache: "no-store", signal: controller.signal, ...options});
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const payload = await response.json();
-    if (payload?.error?.length) throw new Error(payload.error.join(", "));
-    return payload;
-  } finally { clearTimeout(timeout); }
+  const {timeout = REQUEST_TIMEOUT_MS, retryAttempts = REQUEST_RETRY_DELAYS_MS.length, ...requestOptions} = options;
+  let lastError = null;
+  for (let attempt = 0; attempt < retryAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      const response = await fetch(freshUrl(url), {cache: "no-store", signal: controller.signal, ...requestOptions});
+      if (!response.ok) {
+        const error = new Error(`HTTP ${response.status}`);
+        error.status = response.status;
+        error.retryable = response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500;
+        throw error;
+      }
+      const payload = await response.json();
+      if (payload?.error?.length) throw new Error(payload.error.join(", "));
+      return payload;
+    } catch (error) {
+      lastError = error;
+      const retryable = error?.retryable !== false && (error?.name === "AbortError" || error?.name === "TypeError" || error?.retryable === true || !error?.status);
+      if (!retryable || attempt >= retryAttempts - 1) throw error;
+      await delay(REQUEST_RETRY_DELAYS_MS[Math.min(attempt, REQUEST_RETRY_DELAYS_MS.length - 1)]);
+    } finally { clearTimeout(timer); }
+  }
+  throw lastError || new Error("Request failed after retries");
 }
 
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -131,28 +149,28 @@ function renderLongTerm() {
   return boot();
 }
 
-async function refreshLiveQuotes() {
-  if (!snapshot?.candidates?.length) return 0;
-  const expected = snapshot.candidates.length;
+async function refreshLiveQuotes(targetSnapshot = snapshot) {
+  if (!targetSnapshot?.candidates?.length) return 0;
+  const expected = targetSnapshot.candidates.length;
   const refreshStartedAt = new Date().toISOString();
-  snapshot.live_quote_expected_count = expected;
-  snapshot.live_quote_count = 0;
-  snapshot.live_quote_complete = false;
-  snapshot.live_quote_source = "Kraken public Ticker; cache-busted no-store request";
-  snapshot.live_quote_started_at_utc = refreshStartedAt;
-  snapshot.live_quote_failed_symbols = [];
-  snapshot.candidates.forEach(item => { item.live_quote_status = "PENDING"; });
+  targetSnapshot.live_quote_expected_count = expected;
+  targetSnapshot.live_quote_count = 0;
+  targetSnapshot.live_quote_complete = false;
+  targetSnapshot.live_quote_source = "Kraken public Ticker; cache-busted no-store request; up to 3 attempts";
+  targetSnapshot.live_quote_started_at_utc = refreshStartedAt;
+  targetSnapshot.live_quote_failed_symbols = [];
+  targetSnapshot.candidates.forEach(item => { item.live_quote_status = "PENDING"; });
   const pairs = await fetchFreshJson("https://api.kraken.com/0/public/AssetPairs");
   const pairForSymbol = buildUsdPairMap(pairs.result);
-  const requested = snapshot.candidates.map(item => pairForSymbol[String(item.symbol || "").toUpperCase()]).filter(Boolean);
+  const requested = targetSnapshot.candidates.map(item => pairForSymbol[String(item.symbol || "").toUpperCase()]).filter(Boolean);
   if (!requested.length) {
-    snapshot.live_quote_failed_symbols = snapshot.candidates.map(item => item.symbol).filter(Boolean);
+    targetSnapshot.live_quote_failed_symbols = targetSnapshot.candidates.map(item => item.symbol).filter(Boolean);
     return 0;
   }
   const ticker = await fetchFreshJson(`https://api.kraken.com/0/public/Ticker?pair=${encodeURIComponent(requested.join(","))}`);
   let updated = 0;
   const failed = [];
-  for (const item of snapshot.candidates) {
+  for (const item of targetSnapshot.candidates) {
     const symbol = String(item.symbol || "").toUpperCase();
     const key = pairForSymbol[symbol];
     const row = ticker.result?.[key];
@@ -185,11 +203,11 @@ async function refreshLiveQuotes() {
     updated += 1;
   }
   const refreshedAt = new Date().toISOString();
-  snapshot.live_quote_updated_at_utc = refreshedAt;
-  snapshot.live_quote_count = updated;
-  snapshot.live_quote_failed_symbols = failed;
-  snapshot.live_quote_complete = updated === expected && failed.length === 0;
-  snapshot.candidates.forEach(item => { if (item.live_quote_status === "FRESH") item.live_quote_updated_at_utc = refreshedAt; });
+  targetSnapshot.live_quote_updated_at_utc = refreshedAt;
+  targetSnapshot.live_quote_count = updated;
+  targetSnapshot.live_quote_failed_symbols = failed;
+  targetSnapshot.live_quote_complete = updated === expected && failed.length === 0;
+  targetSnapshot.candidates.forEach(item => { if (item.live_quote_status === "FRESH") item.live_quote_updated_at_utc = refreshedAt; });
   return updated;
 }
 
@@ -210,11 +228,11 @@ function rebuildPriceMap(item) {
   }
 }
 
-function recalculateLiveRanking() {
-  if (!snapshot?.candidates?.length) return;
-  const socialBySymbol = Object.fromEntries((snapshot.social_context?.items || []).map(item => [String(item.symbol || "").toUpperCase(), item]));
+function recalculateLiveRanking(targetSnapshot = snapshot) {
+  if (!targetSnapshot?.candidates?.length) return;
+  const socialBySymbol = Object.fromEntries((targetSnapshot.social_context?.items || []).map(item => [String(item.symbol || "").toUpperCase(), item]));
   const clamp = value => Math.max(-1, Math.min(1, value));
-  for (const item of snapshot.candidates) {
+  for (const item of targetSnapshot.candidates) {
     const metrics = item.metrics || {};
     const change = Number(metrics.change_24h_pct) || 0;
     const spread = Math.max(0, Number(metrics.spread_bps) || 0);
@@ -240,13 +258,70 @@ function recalculateLiveRanking() {
     item.explanation = {...(item.explanation || {}), directional_change_24h_pct: change, quick_reason: item.bias === "LONG_RESEARCH" ? "Fresh Kraken quote passed the bullish research threshold." : item.bias === "SHORT_RESEARCH" ? "Fresh Kraken quote passed the bearish research threshold; short execution remains permission-gated." : "Fresh Kraken quote did not clear the directional research threshold."};
     rebuildPriceMap(item);
   }
-  snapshot.candidates.sort((a, b) => Number(b.opportunity_score || 0) - Number(a.opportunity_score || 0) || String(a.symbol || "").localeCompare(String(b.symbol || "")));
-  snapshot.candidates.forEach((item, index) => { item.rank = index + 1; });
-  snapshot.opportunities = snapshot.candidates.filter(item => item.bias !== "AVOID");
-  snapshot.avoids = snapshot.candidates.filter(item => item.bias === "AVOID");
+  targetSnapshot.candidates.sort((a, b) => Number(b.opportunity_score || 0) - Number(a.opportunity_score || 0) || String(a.symbol || "").localeCompare(String(b.symbol || "")));
+  targetSnapshot.candidates.forEach((item, index) => { item.rank = index + 1; });
+  targetSnapshot.opportunities = targetSnapshot.candidates.filter(item => item.bias !== "AVOID");
+  targetSnapshot.avoids = targetSnapshot.candidates.filter(item => item.bias === "AVOID");
 }
 
-async function runDeepScan() {
+function cloneJson(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+async function refreshAllSnapshots() {
+  const results = await Promise.all(Object.entries(modeConfig).map(async ([mode, config]) => {
+    try {
+      return {mode, snapshot: await fetchFreshJson(config.file)};
+    } catch (error) {
+      return {mode, error: error.message || String(error)};
+    }
+  }));
+  const next = {...snapshotsByMode};
+  const failures = [];
+  for (const result of results) {
+    if (result.snapshot) next[result.mode] = result.snapshot;
+    else failures.push(`${modeConfig[result.mode].title}: artifact refresh failed after 3 attempts (${result.error})`);
+  }
+  if (!next[activeMode]) throw new Error(failures.join(" ") || "No schedule snapshot is available.");
+  const latestSocial = Object.values(next).map(item => item.social_context).filter(item => item?.captured_at_utc).sort((a, b) => Date.parse(b.captured_at_utc) - Date.parse(a.captured_at_utc))[0];
+  if (latestSocial) Object.values(next).forEach(item => { item.social_context = cloneJson(latestSocial); item.social_context_refresh_mode = "latest available shared collector snapshot"; });
+  snapshotsByMode = next;
+  snapshot = snapshotsByMode[activeMode];
+  refreshFailures = failures;
+  return failures;
+}
+
+async function refreshAllLiveQuotes() {
+  const results = await Promise.all(Object.entries(snapshotsByMode).map(async ([mode, targetSnapshot]) => {
+    try {
+      const count = await refreshLiveQuotes(targetSnapshot);
+      if (!targetSnapshot.live_quote_complete || count !== targetSnapshot.live_quote_expected_count) throw new Error(`${count}/${targetSnapshot.live_quote_expected_count} complete`);
+      recalculateLiveRanking(targetSnapshot);
+      return {mode};
+    } catch (error) {
+      return {mode, error: error.message || String(error)};
+    }
+  }));
+  const failures = results.filter(result => result.error).map(result => `${modeConfig[result.mode].title}: live quote refresh failed after 3 attempts (${result.error})`);
+  refreshFailures = [...refreshFailures, ...failures];
+  snapshot = snapshotsByMode[activeMode];
+  return failures;
+}
+
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function run() {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await worker(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({length: Math.min(limit, items.length)}, run));
+  return results;
+}
+
+async function runDeepScanLegacy() {
   if (!snapshot?.candidates?.length) return;
   const button = $("#deep-scan-button");
   button.disabled = true; $("#refresh-button").disabled = true; button.textContent = "Scanning history…"; $("#scan-status").textContent = "DEEP SCANNING";
@@ -296,6 +371,59 @@ async function runDeepScan() {
   finally { button.disabled = false; $("#refresh-button").disabled = false; button.textContent = "Deep scan"; }
 }
 
+async function runDeepScan() {
+  if (!snapshot?.candidates?.length) return;
+  const button = $("#deep-scan-button");
+  button.disabled = true; $("#refresh-button").disabled = true; button.textContent = "Scanning all horizons…"; $("#scan-status").textContent = "DEEP SCANNING";
+  const startedAt = performance.now();
+  try {
+    await refreshAllSnapshots();
+    await refreshAllLiveQuotes();
+    if (!liveFreshness(snapshot).ok) throw new Error(liveFreshness(snapshot).reason);
+    const pairs = await fetchFreshJson("https://api.kraken.com/0/public/AssetPairs");
+    const pairForSymbol = buildUsdPairMap(pairs.result);
+    const horizonResults = await Promise.all(Object.entries(snapshotsByMode).map(async ([mode, targetSnapshot]) => {
+      const results = await mapWithConcurrency(targetSnapshot.candidates, 6, async item => {
+        const pair = encodeURIComponent(pairForSymbol[String(item.symbol || "").toUpperCase()] || item.pair_key || item.symbol);
+        try {
+          const result = await fetchFreshJson(`https://api.kraken.com/0/public/OHLC?pair=${pair}&interval=${modeConfig[mode].interval}`);
+          const rows = Object.values(result.result || {}).find(value => Array.isArray(value)) || [];
+          const recent = rows.slice(mode === "hourly" ? -24 : -90);
+          const closes = recent.map(row => Number(row[4])).filter(Number.isFinite);
+          const highs = recent.map(row => Number(row[2])).filter(Number.isFinite);
+          const lows = recent.map(row => Number(row[3])).filter(Number.isFinite);
+          if (closes.length < 3) throw new Error("insufficient OHLC candles");
+          item.metrics.high_24h = Math.max(...highs); item.metrics.low_24h = Math.min(...lows);
+          item.metrics.volatility_24h = (Math.max(...highs) - Math.min(...lows)) / Math.max(closes[0], 0.00000001);
+          item.metrics.history_candles = closes.length;
+          item.deep_scan_observed_at_utc = new Date().toISOString();
+          rebuildPriceMap(item);
+          return true;
+        } catch (error) {
+          item.deep_scan_error = error.name === "AbortError" ? "request timeout after 3 attempts" : error.message;
+          return false;
+        }
+      });
+      const completed = results.filter(Boolean).length;
+      return {mode, completed, total: results.length, failed: results.length - completed};
+    }));
+    const completed = horizonResults.reduce((sum, item) => sum + item.completed, 0);
+    const total = horizonResults.reduce((sum, item) => sum + item.total, 0);
+    const failed = horizonResults.reduce((sum, item) => sum + item.failed, 0);
+    const elapsed = performance.now() - startedAt;
+    if (elapsed < DEEP_SCAN_MIN_MS) await delay(DEEP_SCAN_MIN_MS - elapsed);
+    const finishedAt = new Date().toISOString();
+    Object.values(snapshotsByMode).forEach(targetSnapshot => { targetSnapshot.deep_scan_updated_at_utc = new Date().toISOString(); targetSnapshot.deep_scan_duration_seconds = Number(((performance.now() - startedAt) / 1000).toFixed(1)); targetSnapshot.deep_scan_source_as_of_utc = finishedAt; targetSnapshot.deep_scan_completed = completed; targetSnapshot.deep_scan_failed = failed; });
+    snapshot = snapshotsByMode[activeMode];
+    render();
+    $("#scan-status").textContent = failed ? "DEEP SCAN DEGRADED" : "DEEP SCAN COMPLETE";
+    $("#scan-summary").textContent += ` · Deep scan completed in ${snapshot.deep_scan_duration_seconds}s across all schedules: ${completed}/${total} fresh histories, ${failed} failed.`;
+  } catch (error) {
+    if (!snapshot?.live_quote_complete) renderDataStale(`Deep scan could not verify a complete live quote batch: ${error.message}`);
+    else { $("#scan-status").textContent = "DEEP SCAN FAILED"; $("#scan-summary").textContent = `Deep scan could not complete: ${error.message}`; }
+  } finally { button.disabled = false; $("#refresh-button").disabled = false; button.textContent = "Deep scan"; }
+}
+
 async function analyze(query) {
   const symbol = query.trim().toUpperCase();
   if (!symbol) return;
@@ -329,7 +457,7 @@ async function analyze(query) {
   } catch (error) { result.innerHTML = `<p class="muted">${escapeHtml(error.message)}. Try a Kraken symbol such as BTC or ETH.</p>`; $("#search-status").textContent = "Search unavailable."; }
 }
 
-async function boot({manual = false} = {}) {
+async function bootLegacy({manual = false} = {}) {
   if (!modeConfig[activeMode]) { activeMode = "hourly"; }
   $("#deep-scan-button").disabled = false; $("#deep-scan-button").textContent = "Deep scan";
   const button = $("#refresh-button");
@@ -354,6 +482,31 @@ async function boot({manual = false} = {}) {
   catch (error) { snapshot = null; renderDataStale(`Live market refresh failed: ${error.message}`); }
   finally { button.disabled = false; button.textContent = "Quick scan"; }
 }
+async function boot({manual = false} = {}) {
+  if (!modeConfig[activeMode]) activeMode = "hourly";
+  $("#deep-scan-button").disabled = false; $("#deep-scan-button").textContent = "Deep scan";
+  const button = $("#refresh-button");
+  button.disabled = true; button.textContent = "Refreshing all…"; $("#scan-status").textContent = "REFRESHING ALL SCHEDULES";
+  const previousTimestamp = snapshot?.generated_at_utc;
+  renderDataStale("Refreshing all schedules, prices, and the latest available social/news context…");
+  try {
+    await refreshAllSnapshots();
+    await refreshAllLiveQuotes();
+    snapshot = snapshotsByMode[activeMode];
+    const freshness = liveFreshness(snapshot);
+    if (!freshness.ok) throw new Error(freshness.reason);
+    render();
+    const socialTime = snapshot.social_context?.captured_at_utc ? new Date(snapshot.social_context.captured_at_utc).toLocaleString() : "unavailable";
+    const freshModes = Object.values(snapshotsByMode).filter(item => liveFreshness(item).ok).length;
+    $("#scan-summary").textContent += ` · All schedules refreshed (${freshModes}/${Object.keys(modeConfig).length}); social/news context captured ${socialTime}; up to 3 attempts per source.`;
+    if (refreshFailures.length) $("#scan-summary").textContent += ` · REFRESH DEGRADED: ${refreshFailures.join(" | ")}`;
+    if (manual && previousTimestamp && previousTimestamp === snapshot.generated_at_utc) $("#scan-status").textContent = `LIVE ${modeConfig[activeMode].title}`;
+  } catch (error) {
+    snapshot = snapshotsByMode[activeMode] || null;
+    renderDataStale(`Full refresh failed after retries: ${error.message}`);
+  } finally { button.disabled = false; button.textContent = "Quick scan"; }
+}
+
 $("#search-button").addEventListener("click", () => analyze($("#coin-search").value));
 $("#coin-search").addEventListener("keydown", event => { if (event.key === "Enter") analyze(event.target.value); });
 $("#refresh-button").addEventListener("click", () => boot({manual: true}));

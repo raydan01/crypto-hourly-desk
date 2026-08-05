@@ -6,7 +6,9 @@ import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from time import sleep
 from urllib.parse import urlencode
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).parent
@@ -19,18 +21,29 @@ OUTPUT = ROOT / "data" / "market-opportunities-hourly-latest.json"
 WATCHLIST = ROOT / "data" / "watchlist.json"
 API = "https://api.kraken.com/0/public"
 NON_CRYPTO_SYMBOLS = {"USD", "GBP", "EUR", "CAD", "AUD", "JPY", "CHF"}
+RETRY_DELAYS_SECONDS = (1, 3, 8)
 
 
 def request_json(endpoint: str, params: dict[str, str] | None = None) -> dict:
     url = f"{API}{endpoint}"
     if params:
         url += "?" + urlencode(params)
-    request = Request(url, headers={"Accept": "application/json", "User-Agent": "crypto-hourly-desk/1.0"})
-    with urlopen(request, timeout=30) as response:
-        payload = json.load(response)
-    if payload.get("error"):
-        raise RuntimeError("Kraken public API returned an error")
-    return payload.get("result") or {}
+    last_error = None
+    for attempt, delay in enumerate((*RETRY_DELAYS_SECONDS, None)):
+        try:
+            request = Request(url, headers={"Accept": "application/json", "User-Agent": "crypto-hourly-desk/1.0"})
+            with urlopen(request, timeout=30) as response:
+                payload = json.load(response)
+            if payload.get("error"):
+                raise RuntimeError("Kraken public API returned an error")
+            return payload.get("result") or {}
+        except Exception as exc:
+            last_error = exc
+            retryable = (exc.code in {408, 425, 429} or exc.code >= 500) if isinstance(exc, HTTPError) else isinstance(exc, (TimeoutError, OSError))
+            if not retryable or delay is None:
+                raise
+            sleep(delay)
+    raise last_error or RuntimeError("Kraken public API failed after retries")
 
 
 def number(value, default=None):
@@ -54,7 +67,7 @@ def eligible_pairs(asset_pairs: dict) -> dict[str, dict[str, str]]:
     return result
 
 
-def build_snapshot(cadence: str = "hourly") -> dict:
+def build_snapshot(cadence: str = "hourly", social_context: dict | None = None) -> dict:
     captured = datetime.now(timezone.utc).isoformat()
     pairs = eligible_pairs(request_json("/AssetPairs"))
     ticker = request_json("/Ticker", {"pair": ",".join(item["pair_key"] for item in pairs.values())})
@@ -93,7 +106,7 @@ def build_snapshot(cadence: str = "hourly") -> dict:
         item["universe_bucket"] = "DISCOVERY"
     selected = selected_watched + selected_discovery
     focused_scan = {**scan, "candidates": selected}
-    social = build_social_context()
+    social = social_context if social_context is not None else build_social_context()
     payload = build_opportunity_payload(focused_scan, generated_at_utc=captured, cadence=cadence, social_context=social)
     selected_symbols = {item["symbol"] for item in selected}
     schedule_timeframe = {"hourly": "SHORT_TERM", "daily": "MEDIUM_LONG_TERM", "long-term": "LONG_TERM"}.get(cadence, "SHORT_TERM")

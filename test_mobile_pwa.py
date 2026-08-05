@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
+import social_context
 from research.market_opportunities import score_candidate
 
 
@@ -13,6 +14,20 @@ def test_social_context_can_change_neutral_market_direction_and_score_is_bounded
     result = score_candidate(item, {"attention_score": 90, "price_change_24h_pct": 4, "source_counts": {"google_news": 10, "reddit": 5}})
     assert result["bias"] == "LONG_RESEARCH"
     assert 0 <= result["score"] <= 100
+
+
+def test_social_source_retries_transient_failures_three_times(monkeypatch):
+    attempts = []
+    monkeypatch.setattr(social_context, "sleep", lambda _seconds: None)
+
+    def flaky_source():
+        attempts.append(len(attempts) + 1)
+        if len(attempts) < 3:
+            raise TimeoutError("temporary source outage")
+        return "recovered"
+
+    assert social_context._with_retries(flaky_source) == "recovered"
+    assert attempts == [1, 2, 3]
 
 
 def test_mobile_package_has_installable_shell_and_hourly_snapshot():
@@ -75,6 +90,11 @@ def test_mobile_desk_has_manual_refresh_and_explains_research_only_state():
     assert "DEEP_SCAN_MIN_MS = 15000" in app
     assert "deep_scan_duration_seconds" in app
     assert "recalculateLiveRanking" in app
+    assert "REQUEST_RETRY_DELAYS_MS = [300, 1000, 2500]" in app
+    assert "refreshAllSnapshots" in app
+    assert "refreshAllLiveQuotes" in app
+    assert "All schedules refreshed" in app
+    assert "up to 3 attempts per source" in app
     assert "social/news artifact captured" in app
     assert "const allChoices = snapshot.candidates || []" in app
     assert "const displayPriority = {LONG_RESEARCH: 0, SHORT_RESEARCH: 1, AVOID: 2}" in app
@@ -101,10 +121,25 @@ def test_mobile_desk_has_fail_closed_freshness_contract():
     assert "fetchFreshJson(`https://api.kraken.com/0/public/Ticker" in app
     assert "Kraken returned an invalid USD quote range" in app
     assert 'item.margin_status === "verified_enabled"' in app
-    assert "crypto-hourly-desk-v7-short-research" in worker
+    assert "crypto-hourly-desk-v8-full-refresh" in worker
     assert "caches.delete(key)" in worker
     assert '"market_data_source"' in refresh
     assert '"freshness_contract"' in refresh
+    assert "RETRY_DELAYS_SECONDS = (1, 3, 8)" in refresh
+
+
+def test_refresh_pipeline_retries_social_sources_and_deploys_after_scheduled_refreshes():
+    social = (ROOT / "social_context.py").read_text(encoding="utf-8")
+    daily = (ROOT / "refresh_daily.py").read_text(encoding="utf-8")
+    pages = (ROOT / ".github" / "workflows" / "pages.yml").read_text(encoding="utf-8")
+    assert "MAX_ATTEMPTS = len(RETRY_DELAYS_SECONDS) + 1" in social
+    assert "return _with_retries(operation)" in social
+    assert "social = build_social_context()" in daily
+    assert "social_context=social" in daily
+    assert "workflow_run:" in pages
+    assert "Refresh hourly market snapshot" in pages
+    assert "Refresh weekly trading snapshot" in pages
+    assert "conclusion == 'success'" in pages
 
 
 def test_installed_refresh_wrappers_update_mobile_artifacts():
