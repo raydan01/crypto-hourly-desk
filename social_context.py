@@ -4,25 +4,56 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from time import perf_counter
+from time import sleep
 from urllib.parse import quote_plus
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 
+RETRY_DELAYS_SECONDS = (1, 3, 8)
+MAX_ATTEMPTS = len(RETRY_DELAYS_SECONDS) + 1
+
+
+def _retryable(exc: Exception) -> bool:
+    if isinstance(exc, HTTPError):
+        return exc.code in {408, 425, 429} or exc.code >= 500
+    return isinstance(exc, (TimeoutError, OSError, json.JSONDecodeError))
+
+
+def _with_retries(operation):
+    last_error = None
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            return operation()
+        except Exception as exc:
+            last_error = exc
+            if not _retryable(exc) or attempt >= MAX_ATTEMPTS - 1:
+                raise
+            sleep(RETRY_DELAYS_SECONDS[attempt])
+    raise last_error or RuntimeError("source failed after retries")
+
+
 def _json(url: str) -> dict:
-    request = Request(url, headers={"Accept": "application/json", "User-Agent": "crypto-hourly-desk/1.1"})
-    with urlopen(request, timeout=20) as response:
-        value = json.loads(response.read().decode("utf-8"))
-    if not isinstance(value, dict):
-        raise RuntimeError("source returned an invalid response")
-    return value
+    def operation():
+        request = Request(url, headers={"Accept": "application/json", "User-Agent": "crypto-hourly-desk/1.1"})
+        with urlopen(request, timeout=20) as response:
+            value = json.loads(response.read().decode("utf-8"))
+        if not isinstance(value, dict):
+            raise RuntimeError("source returned an invalid response")
+        return value
+
+    return _with_retries(operation)
 
 
 def _rss_count(url: str) -> int:
-    request = Request(url, headers={"Accept": "application/rss+xml, application/atom+xml", "User-Agent": "crypto-hourly-desk/1.1"})
-    with urlopen(request, timeout=15) as response:
-        root = ET.fromstring(response.read())
-    return len(root.findall(".//item")) + len(root.findall(".//{http://www.w3.org/2005/Atom}entry"))
+    def operation():
+        request = Request(url, headers={"Accept": "application/rss+xml, application/atom+xml", "User-Agent": "crypto-hourly-desk/1.1"})
+        with urlopen(request, timeout=15) as response:
+            root = ET.fromstring(response.read())
+        return len(root.findall(".//item")) + len(root.findall(".//{http://www.w3.org/2005/Atom}entry"))
+
+    return _with_retries(operation)
 
 
 def build_social_context(*, max_trending: int = 20, enriched: int = 10) -> dict:

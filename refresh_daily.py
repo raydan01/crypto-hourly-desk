@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from refresh_hourly import build_snapshot
+from social_context import build_social_context
 
 ROOT = Path(__file__).parent
 OUTPUT = ROOT / "data" / "market-opportunities-daily-latest.json"
@@ -12,5 +13,6 @@ LONG_OUTPUT = ROOT / "data" / "market-opportunities-long-term-latest.json"
 
 
 if __name__ == "__main__":
-    OUTPUT.write_text(json.dumps(build_snapshot(cadence="daily"), sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
-    LONG_OUTPUT.write_text(json.dumps(build_snapshot(cadence="long-term"), sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    social = build_social_context()
+    OUTPUT.write_text(json.dumps(build_snapshot(cadence="daily", social_context=social), sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    LONG_OUTPUT.write_text(json.dumps(build_snapshot(cadence="long-term", social_context=social), sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
