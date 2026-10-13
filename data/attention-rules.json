@@ -1,0 +1,72 @@
+{
+  "schema": "market-attention-rules.v1",
+  "version": 1,
+  "contract": {
+    "purpose": "Shared parameters for the Python collector and browser evaluator. Evaluators may implement predicates in their language but must not duplicate these values or change the documented semantics.",
+    "primary_pair": "Choose one pair per CoinGecko identity: the known pair with the greatest numeric liquidity_usd across all supported known contracts. Pair ordering, selected chain, and response ordering do not affect selection. A pair without numeric liquidity is not eligible.",
+    "observations": "Pair-specific observations are generated only from the primary pair, except SELLING_PRESSURE which is a neutral note from any known pair. Coin-level volume observation uses CoinGecko market values. Keep pair_address and dex_id on pair observations. Selling pressure is excluded from the FOMO flag count.",
+    "missing_history": "If prior rank, prior positive volume, current volume, or a valid prior capture timestamp is missing, momentum is INSUFFICIENT_HISTORY; do not infer a direction.",
+    "momentum": "rank_change is prior_rank - current_rank, so positive means rank improved. Volume moves within the inclusive noise band are flat. MIXED requires nonzero rank and volume directions that disagree. With flat volume, rank direction controls; with unchanged rank, volume direction controls.",
+    "watch_only": "These descriptive observations do not alter score, ordering, direction, alerts, trade gates, or trading behavior."
+  },
+  "primary_pair": {
+    "liquidity_field": "liquidity_usd",
+    "require_numeric_liquidity": true,
+    "select": "maximum"
+  },
+  "observations": {
+    "pair_under_24h": {
+      "kind": "PAIR_UNDER_24H",
+      "max_age_seconds_exclusive": 86400,
+      "primary_pair_only": true
+    },
+    "liquidity_under_value": {
+      "kind": "LIQUIDITY_UNDER_5_PERCENT",
+      "ratio_percent_exclusive": 5,
+      "denominator_priority": ["fdv_usd", "market_cap_usd", "coingecko_market_cap_usd"],
+      "primary_pair_only": true
+    },
+    "buy_sell_imbalance": {
+      "kind": "BUY_SELL_IMBALANCE",
+      "period": "h24",
+      "minimum_larger_side_transactions_inclusive": 20,
+      "ratio_inclusive": 1.5,
+      "minimum_smaller_side_denominator": 1,
+      "primary_pair_only": true
+    },
+    "selling_pressure": {
+      "kind": "SELLING_PRESSURE",
+      "period": "h24",
+      "minimum_larger_side_transactions_inclusive": 20,
+      "ratio_inclusive": 1.5,
+      "minimum_smaller_side_denominator": 1,
+      "primary_pair_only": false,
+      "count_as_fomo_flag": false,
+      "presentation": "neutral"
+    },
+    "dex_price_move": {
+      "kind": "DEX_PRICE_MOVE",
+      "period": "h24",
+      "absolute_percent_exclusive": 100,
+      "primary_pair_only": true
+    },
+    "volume_above_market_cap": {
+      "kind": "VOLUME_ABOVE_MARKET_CAP",
+      "volume_field": "coingecko_volume_24h_usd",
+      "market_cap_field": "coingecko_market_cap_usd",
+      "comparison": "strictly_greater"
+    }
+  },
+  "momentum": {
+    "rank_change_formula": "previous_rank - current_rank",
+    "volume_noise_band_percent_inclusive": 5,
+    "states": ["RISING", "FADING", "FLAT", "MIXED", "INSUFFICIENT_HISTORY", "NEW_SINCE_PRIOR_CAPTURE"],
+    "rank_improved_with_volume_down_beyond_noise": "MIXED",
+    "rank_worsened_with_volume_up_beyond_noise": "MIXED",
+    "rank_improved_with_volume_flat": "RISING",
+    "rank_worsened_with_volume_flat": "FADING",
+    "rank_unchanged_with_volume_up_beyond_noise": "RISING",
+    "rank_unchanged_with_volume_down_beyond_noise": "FADING",
+    "both_directions_flat": "FLAT"
+  }
+}
