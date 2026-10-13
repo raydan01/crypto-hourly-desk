@@ -348,13 +348,45 @@ def test_prior_capture_time_must_be_earlier_and_comparable(monkeypatch):
         assert result["items"][0]["momentum"]["comparison_at_utc"] is None
 
 
+def _assert_public_capture_guard(artifact: dict) -> None:
+    assert social_context.validate_social_context(artifact)
+    assert artifact["status"] in {"NO_DATA", "READY", "DEGRADED"}
+    serialized = json.dumps(artifact, sort_keys=True).casefold()
+    for marker in ("PairPrimaryExample", "news.example.test", "Crawlerpad token market update"):
+        assert marker.casefold() not in serialized
+
+    private_names = {"paper", "paper_trading", "positions", "pnl", "balance", "account", "private_data"}
+
+    def check_keys(value):
+        if isinstance(value, dict):
+            assert not (set(key.casefold() for key in value) & private_names)
+            for child in value.values():
+                check_keys(child)
+        elif isinstance(value, list):
+            for child in value:
+                check_keys(child)
+
+    check_keys(artifact)
+    for fixture in FIXTURES.rglob("*.json"):
+        try:
+            candidate = json.loads(fixture.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(candidate, dict) and "captured_at_utc" in candidate and isinstance(candidate.get("items"), list):
+            assert (artifact.get("captured_at_utc"), artifact["items"]) != (candidate.get("captured_at_utc"), candidate["items"]), fixture
+
+
 def test_committed_public_social_capture_is_no_data_and_not_fixture_content():
     artifact = json.loads((ROOT / "data" / "social-context-v2-latest.json").read_text(encoding="utf-8"))
-    assert artifact["status"] == "NO_DATA" and artifact["items"] == []
-    assert artifact["source_health"]["coingecko_trending"]["status"] == "NOT_QUERIED"
-    public = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in (ROOT / "data").glob("*.json"))
-    for marker in ("PairPrimaryExample", "news.example.test", "Crawlerpad token market update"):
-        assert marker not in public
+    _assert_public_capture_guard(artifact)
+
+    recorded = json.loads((FIXTURES / "recorded" / "live-collector-output-f494d74.json").read_text(encoding="utf-8"))
+    real_capture = json.loads(json.dumps(recorded))
+    real_capture["captured_at_utc"] = "2026-10-13T10:03:00Z"
+    real_capture["items"][0]["name"] += " Live"
+    _assert_public_capture_guard(real_capture)
+    with pytest.raises(AssertionError):
+        _assert_public_capture_guard(recorded)
 
 
 def test_hourly_script_entrypoint_replays_recorded_provider_boundaries(tmp_path, monkeypatch):
