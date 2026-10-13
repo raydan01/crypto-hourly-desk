@@ -163,23 +163,45 @@ def _contains(text: str, phrase: str) -> bool:
     return re.search(r"(?<![\w])" + re.escape(phrase) + r"(?![\w])", text, re.IGNORECASE) is not None
 
 
-def _match(item: dict, name: str, symbol: str) -> str | None:
-    title = item["title"]
-    symbol_pattern = r"(?<![\w])\$" + re.escape(symbol) + r"(?![\w])" if symbol else None
+def _mention_tier(item: dict, name: str, symbol: str) -> str | None:
+    """Classify a title as about this coin, related crypto buzz, or unrelated."""
+    title = str(item.get("title") or "")
+    symbol = symbol.strip().upper()
     name_match = _contains(title, name)
-    dollar_symbol_match = bool(symbol_pattern and re.search(symbol_pattern, title))
-    if not name_match and not dollar_symbol_match:
+    # A few common names double as their entire ticker (the recorded CLAUDIA
+    # feed includes human headlines and CryptoRank converter pages). Treating
+    # that exact spelling as an independent symbol would turn those into coin
+    # matches. Other explicit ticker forms remain unambiguous.
+    same_name_symbol = bool(symbol and name.casefold() == symbol.casefold())
+    dollar_symbol = bool(symbol and re.search(r"(?<![\w])\$" + re.escape(symbol) + r"(?![\w])", title))
+    parenthesized_symbol = bool(symbol and re.search(r"\(\s*" + re.escape(symbol) + r"\s*\)", title))
+    if same_name_symbol and "cryptorank" in title.casefold() and not (dollar_symbol or parenthesized_symbol):
         return None
-    # "Bunker mode" is also generic security language; the recorded Ethereum
-    # headlines describe preparation, not the trending token.
-    if name.casefold() == "bunker mode" and _contains(title, "prepare for bunker mode") and not dollar_symbol_match:
+    uppercase_symbol = bool(symbol and not same_name_symbol and re.search(r"(?<![\w])" + re.escape(symbol) + r"(?![\w])", title))
+    asset_match = name_match or dollar_symbol or parenthesized_symbol or uppercase_symbol
+    if not asset_match:
         return None
-    independent_symbol = bool(symbol and symbol.casefold() != name.casefold())
-    symbol_context = bool(independent_symbol and re.search(r"(?<![\w])" + re.escape(symbol) + r"(?![\w])", title))
-    paren_symbol = bool(independent_symbol and re.search(r"\(\s*" + re.escape(symbol) + r"\s*\)", title))
+
+    name_followed_by_coin_marker = bool(name_match and re.search(
+        re.escape(name) + r"(?:\W+\w+){0,3}\W+(?:token|coin|memecoin|meme\s+coin|price|presale)(?!\w)",
+        title, re.IGNORECASE,
+    ))
+    usd_price_with_word_price = bool(name_match and re.search(r"\$\d+(?:\.\d+)?", title) and _contains(title, "price"))
+    coin_page_title = bool(name_match and re.search(r"\b(?:coingecko|coinmarketcap)\b", title, re.IGNORECASE))
+    if dollar_symbol or parenthesized_symbol or uppercase_symbol or name_followed_by_coin_marker or usd_price_with_word_price or coin_page_title:
+        return "coin"
+
+    # The broader title relevance rule is retained as a secondary signal. It
+    # requires the actual name; context text in the description is ignored.
     context_terms = ("crypto", "cryptocurrency", "token", "coin", "memecoin", "meme coin", "blockchain", "defi", "dex", "airdrop", "presale", "solana", "ethereum", "bnb chain", "robinhood chain", "pump.fun", "coingecko", "coinmarketcap")
-    crypto_context = symbol_context or paren_symbol or dollar_symbol_match or any(_contains(title, term) for term in context_terms)
-    return "title" if crypto_context else None
+    if name_match and any(_contains(title, term) for term in context_terms):
+        return "related"
+    return None
+
+
+def _match(item: dict, name: str, symbol: str) -> str | None:
+    """Compatibility helper returning the legacy title match marker."""
+    return "title" if _mention_tier(item, name, symbol) else None
 
 
 def _mentions(source: str, name: str, symbol: str, now: datetime) -> dict:
@@ -197,26 +219,32 @@ def _mentions(source: str, name: str, symbol: str, now: datetime) -> dict:
     except Exception as exc:
         limited = source == "reddit" and isinstance(exc, RedditUnavailable)
         quota = {name: _last_response_headers[name] for name in ("x-ratelimit-used", "x-ratelimit-remaining", "x-ratelimit-reset") if name in _last_response_headers} if limited else None
-        return {"status": "UNAVAILABLE" if limited else "DEGRADED", "reason": "rate-limited by Reddit" if limited else None, "rate_limit_headers": quota, "query_at_utc": _iso(now), "relevant_count_24h": None, "relevant_count_7d": None, "newest_published_at_utc": None, "newest_age_seconds": None, "matched_item_count": 0, "headlines": [], "error_class": "HTTP_429" if limited else type(exc).__name__, "query": quoted_name if source == "google_news" else f'"{name}" sitewide'}
-    matched: dict[str, dict] = {}
+        return {"status": "UNAVAILABLE" if limited else "DEGRADED", "reason": "rate-limited by Reddit" if limited else None, "rate_limit_headers": quota, "query_at_utc": _iso(now), "coin_count_24h": None, "coin_count_7d": None, "related_count_24h": None, "related_count_7d": None, "newest_published_at_utc": None, "newest_age_seconds": None, "matched_item_count": 0, "related_item_count": 0, "headlines": [], "related_headlines": [], "error_class": "HTTP_429" if limited else type(exc).__name__, "query": quoted_name if source == "google_news" else f'"{name}" sitewide'}
+    matched: dict[str, dict[str, dict]] = {"coin": {}, "related": {}}
     undated_count = 0
     for item in items:
-        where = _match(item, name, symbol)
+        tier = _mention_tier(item, name, symbol)
         published = _timestamp(item.get("published"))
         link = item.get("url", "").strip()
         parsed_link = urlsplit(link)
         if parsed_link.scheme != "https" or not parsed_link.netloc:
             continue
-        if where and link and not published:
+        if tier and link and not published:
             undated_count += 1
-        if not where or not published or not link or published > now or (now - published).total_seconds() >= 604800:
+        if not tier or not published or not link or published > now or (now - published).total_seconds() >= 604800:
             continue
         key = link or (item["title"], _iso(published))
-        row = {"title": item["title"], "url": link, "published_at_utc": _iso(published), "age_seconds": max(0, int((now - published).total_seconds())), "matched_text": where}
-        if key not in matched or row["age_seconds"] < matched[key]["age_seconds"]:
-            matched[key] = row
-    results = sorted(matched.values(), key=lambda row: row["published_at_utc"], reverse=True)
-    return {"status": "FRESH", "query_at_utc": _iso(now), "relevant_count_24h": sum(row["age_seconds"] < 86400 for row in results), "relevant_count_7d": sum(row["age_seconds"] < 604800 for row in results), "newest_published_at_utc": results[0]["published_at_utc"] if results else None, "newest_age_seconds": results[0]["age_seconds"] if results else None, "matched_item_count": len(results), "undated_matched_item_count": undated_count, "headlines": results[:3], "error_class": None, "query": quoted_name if source == "google_news" else f'"{name}" sitewide'}
+        if tier == "related" and key in matched["coin"]:
+            continue
+        if tier == "coin":
+            matched["related"].pop(key, None)
+        rows = matched[tier]
+        row = {"title": item["title"], "url": link, "published_at_utc": _iso(published), "age_seconds": max(0, int((now - published).total_seconds())), "matched_text": tier}
+        if key not in rows or row["age_seconds"] < rows[key]["age_seconds"]:
+            rows[key] = row
+    coin_rows = sorted(matched["coin"].values(), key=lambda row: row["published_at_utc"], reverse=True)
+    related_rows = sorted(matched["related"].values(), key=lambda row: row["published_at_utc"], reverse=True)
+    return {"status": "FRESH", "query_at_utc": _iso(now), "coin_count_24h": sum(row["age_seconds"] < 86400 for row in coin_rows), "coin_count_7d": sum(row["age_seconds"] < 604800 for row in coin_rows), "related_count_24h": sum(row["age_seconds"] < 86400 for row in related_rows), "related_count_7d": sum(row["age_seconds"] < 604800 for row in related_rows), "newest_published_at_utc": coin_rows[0]["published_at_utc"] if coin_rows else None, "newest_age_seconds": coin_rows[0]["age_seconds"] if coin_rows else None, "matched_item_count": len(coin_rows), "related_item_count": len(related_rows), "undated_matched_item_count": undated_count, "headlines": coin_rows[:3], "related_headlines": related_rows[:3], "error_class": None, "query": quoted_name if source == "google_news" else f'"{name}" sitewide'}
 
 
 def _identity(coin_id: str, cached: dict | None, now: datetime) -> dict:
@@ -362,7 +390,27 @@ def _old_capture() -> dict | None:
 
 
 def validate_social_context(value: dict) -> bool:
-    return isinstance(value, dict) and value.get("schema_version") == "social-context.v2" and value.get("research_only") is True and value.get("trade_authorization") is False and value.get("execution_allowed") is False and isinstance(value.get("items"), list) and isinstance(value.get("source_health"), dict)
+    if not (isinstance(value, dict) and value.get("schema_version") == "social-context.v2" and value.get("research_only") is True and value.get("trade_authorization") is False and value.get("execution_allowed") is False and isinstance(value.get("items"), list) and isinstance(value.get("source_health"), dict)):
+        return False
+    required = {"coin_count_24h", "coin_count_7d", "related_count_24h", "related_count_7d", "headlines", "related_headlines"}
+    for item in value["items"]:
+        mentions = item.get("mentions") if isinstance(item, dict) else None
+        if not isinstance(mentions, dict):
+            return False
+        for source in ("google_news", "reddit"):
+            mention = mentions.get(source)
+            if not isinstance(mention, dict) or not required.issubset(mention):
+                return False
+            if any(not isinstance(mention[field], list) or len(mention[field]) > 3 for field in ("headlines", "related_headlines")):
+                return False
+            for field in ("coin_count_24h", "coin_count_7d", "related_count_24h", "related_count_7d"):
+                count = mention[field]
+                if mention.get("status") == "FRESH":
+                    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                        return False
+                elif count is not None:
+                    return False
+    return True
 
 
 def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MAX_ENRICHED, previous: dict | None = None, now: datetime | None = None) -> dict:
@@ -411,7 +459,7 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
             news = _mentions("google_news", name, symbol, captured_at)
             reddit = _mentions("reddit", name, symbol, captured_at)
         else:
-            news = {"status": "NOT_QUERIED", "query_at_utc": None, "relevant_count_24h": None, "relevant_count_7d": None, "newest_published_at_utc": None, "newest_age_seconds": None, "matched_item_count": 0, "headlines": []}
+            news = {"status": "NOT_QUERIED", "query_at_utc": None, "coin_count_24h": None, "coin_count_7d": None, "related_count_24h": None, "related_count_7d": None, "newest_published_at_utc": None, "newest_age_seconds": None, "matched_item_count": 0, "related_item_count": 0, "headlines": [], "related_headlines": []}
             reddit = dict(news)
         contracts = identity.get("contracts") or []
         dex_pairs = []
@@ -427,7 +475,7 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
         mention_changes = {}
         for source, current in (("google_news", news), ("reddit", reddit)):
             prior = (old.get("mentions", {}).get(source) or {})
-            mention_changes[source] = {window: (current.get(f"relevant_count_{window}") - prior.get(f"relevant_count_{window}")) if current.get("status") == "FRESH" and prior.get("status") == "FRESH" and isinstance(current.get(f"relevant_count_{window}"), int) and isinstance(prior.get(f"relevant_count_{window}"), int) else None for window in ("24h", "7d")}
+            mention_changes[source] = {window: (current.get(f"coin_count_{window}") - prior.get(f"coin_count_{window}")) if current.get("status") == "FRESH" and prior.get("status") == "FRESH" and isinstance(current.get(f"coin_count_{window}"), int) and isinstance(prior.get(f"coin_count_{window}"), int) else None for window in ("24h", "7d")}
         prior_time = _timestamp(previous.get("captured_at_utc")) if previous else None
         comparable = bool(prior_time and prior_time < captured_at and old and isinstance(old.get("trending", {}).get("rank"), int) and isinstance(old_volume, (int, float)) and old_volume > 0 and isinstance(volume, (int, float)))
         comparison = _iso(prior_time) if comparable else None

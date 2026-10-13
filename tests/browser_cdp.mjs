@@ -60,6 +60,8 @@ const identityFailureFixture = Buffer.from(JSON.stringify(identityFailureFixture
 let successfulTradingArtifactLoads = 0;
 let failedHourlyArtifactRequests = 0;
 let hourlyArtifactRequests = 0;
+let failedDailyArtifactRequests = 0;
+let dailyArtifactRequests = 0;
 const server = http.createServer((request, response) => {
   const pathname = decodeURIComponent(new URL(request.url, "http://127.0.0.1").pathname);
   const scenario = new URL(request.headers.referer || "http://127.0.0.1/").searchParams.get("testScenario") || /(?:^|;\s*)testScenario=([^;]+)/.exec(request.headers.cookie || "")?.[1];
@@ -79,6 +81,14 @@ const server = http.createServer((request, response) => {
       return;
     }
   }
+  if (scenario === "deep-artifact-failure" && pathname === "/data/market-opportunities-daily-latest.json") {
+    dailyArtifactRequests += 1;
+    if (dailyArtifactRequests > 1) {
+      failedDailyArtifactRequests += 1;
+      response.writeHead(404).end("missing daily fixture");
+      return;
+    }
+  }
   const target = path.resolve(ROOT, `.${pathname}`);
   if (target !== ROOT && !target.startsWith(ROOT + path.sep)) {
     response.writeHead(403).end("forbidden");
@@ -92,6 +102,8 @@ const server = http.createServer((request, response) => {
     const endpoint = pathname.split("/").pop();
     const payload = endpoint === "AssetPairs"
       ? {result: Object.fromEntries(symbols.map(symbol => [`${symbol}USD`, {status: "online", wsname: `${symbol}/USD`}]))}
+      : endpoint === "OHLC"
+      ? {result: {XXBTZUSD: [[1, "100", "105", "95", "101", "100", "200", 50], [2, "101", "106", "96", "102", "100", "200", 50], [3, "102", "107", "97", "103", "100", "200", 50]], last: 3}}
       : {result: Object.fromEntries(symbols.map(symbol => [`${symbol}USD`, {c: ["100"], b: ["99.99"], a: ["100.01"], o: "99", h: ["105", "105"], l: ["95", "95"], v: ["100", "100000"]}]))};
     response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }).end(JSON.stringify(payload));
     return;
@@ -226,6 +238,8 @@ try {
   }
   assert.equal(hanging.cards, 6, JSON.stringify(hanging));
   assert.ok(Date.now() - hangingStartedAt < 2000, "Hype waited for the never-resolving Trading request");
+  const hangingTradingSummary = await evaluate(`document.querySelector("#scan-summary")?.textContent || ""`);
+  assert.ok(!/social|news/i.test(hangingTradingSummary), hangingTradingSummary);
   await pageSend("Page.navigate", { url: `http://127.0.0.1:${sitePort}/index.html?testScenario=trading-failure` });
   const returnedDeadline = Date.now() + 10000;
   let returned;
@@ -235,11 +249,14 @@ try {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   await evaluate(`document.querySelector("#social-items .hype-card").open = true`);
-  const expanded = await evaluate(`({width: document.documentElement.scrollWidth, headlines: document.querySelectorAll("#social-items .hype-card:first-child .headlines a").length, pairs: document.querySelectorAll("#social-items .pair-row").length, reddit: document.querySelector("#social-items").innerText.includes("Reddit unavailable (rate-limited)"), contract: document.querySelector("#social-items .contract-list code")?.textContent})`);
+  const expanded = await evaluate(`({width: document.documentElement.scrollWidth, headlines: document.querySelectorAll("#social-items .hype-card:first-child .headlines a").length, pairs: document.querySelectorAll("#social-items .pair-row").length, reddit: document.querySelector("#social-items").innerText.includes("Reddit unavailable (rate-limited)"), tiers: document.querySelector("#social-items .hype-card:first-child .hype-body").innerText, contract: document.querySelector("#social-items .contract-list code")?.textContent})`);
   assert.ok(expanded.width <= 390, JSON.stringify(expanded));
   assert.equal(expanded.headlines, 1, JSON.stringify(expanded));
   assert.equal(expanded.pairs, 2, JSON.stringify(expanded));
   assert.equal(expanded.reddit, true, JSON.stringify(expanded));
+  assert.ok(expanded.tiers.includes("About this coin"), expanded.tiers);
+  assert.ok(expanded.tiers.includes("Related crypto buzz (headlines using 'Crawlerpad', not necessarily this coin): 5 in 7d"), expanded.tiers);
+  assert.ok(expanded.tiers.includes("Crawlerpad news with crypto context"), expanded.tiers);
   assert.equal(expanded.contract, "CQCDTp8rsFV3PhaPeYjcCW5LdGTxi6jFx7eC3UXnpump");
   const dexStatusChecks = await evaluate(`(() => {
     const cards = [...document.querySelectorAll("#social-items .hype-card")];
@@ -294,9 +311,26 @@ try {
   }
   assert.equal(reverseTrading.active, true, JSON.stringify(reverseTrading));
   assert.equal(reverseTrading.status, "FRESH DAY TRADING", JSON.stringify(reverseTrading));
+  await pageSend("Page.navigate", { url: `http://127.0.0.1:${sitePort}/index.html?testScenario=deep-artifact-failure` });
+  const deepReadyDeadline = Date.now() + 10000;
+  while (Date.now() < deepReadyDeadline && await evaluate(`document.querySelector("#refresh-button")?.disabled`)) await new Promise(resolve => setTimeout(resolve, 50));
+  const loadingCopy = await evaluate(`document.querySelector("#scan-summary")?.textContent || ""`);
+  assert.ok(!/social|news/i.test(loadingCopy), loadingCopy);
+  await evaluate(`document.querySelector("#deep-scan-button").click()`);
+  const deepDeadline = Date.now() + 25000;
+  let deepPartial;
+  while (Date.now() < deepDeadline) {
+    deepPartial = await evaluate(`({status: document.querySelector("#scan-status")?.textContent, summary: document.querySelector("#scan-summary")?.textContent})`);
+    if (deepPartial.status === "DEEP SCAN PARTIAL") break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.ok(failedDailyArtifactRequests > 0, `Deep scan did not simulate daily artifact failure: ${failedDailyArtifactRequests}`);
+  assert.equal(deepPartial.status, "DEEP SCAN PARTIAL", JSON.stringify(deepPartial));
+  assert.ok(deepPartial.summary.includes("schedule artifacts refreshed (2/3)"), JSON.stringify(deepPartial));
+  assert.match(deepPartial.summary, /artifact captured \d{4}-\d{2}-\d{2}T/, JSON.stringify(deepPartial));
   assert.ok(successfulTradingArtifactLoads > 0, `Trading artifacts were not served successfully: ${successfulTradingArtifactLoads}`);
   assert.deepEqual(exceptions, []);
-  console.log(JSON.stringify({ browser: "Microsoft Edge headless CDP", viewport: "390x844", initial, quickFailure, hanging, failedHourlyArtifactRequests, tradingFailureState, expanded, dexStatusChecks, trading, reverse, reverseTrading, successfulTradingArtifactLoads, exceptions }, null, 2));
+  console.log(JSON.stringify({ browser: "Microsoft Edge headless CDP", viewport: "390x844", initial, quickFailure, hanging, failedHourlyArtifactRequests, tradingFailureState, expanded, dexStatusChecks, trading, reverse, reverseTrading, deepPartial, failedDailyArtifactRequests, successfulTradingArtifactLoads, exceptions }, null, 2));
 } finally {
   try { shutdownBrowser?.(); } catch {}
   try { ws?.close(); } catch {}

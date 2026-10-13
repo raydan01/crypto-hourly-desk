@@ -63,10 +63,10 @@ def test_production_default_collector_replays_real_shape_http_boundary(monkeypat
     assert result["research_only"] and result["trade_authorization"] is False and result["execution_allowed"] is False
     assert result["items"][0]["coingecko_id"] == "crawlerpad"
     item = result["items"][0]
-    assert item["mentions"]["google_news"]["relevant_count_24h"] == 1
-    assert item["mentions"]["google_news"]["relevant_count_7d"] == 1
+    assert item["mentions"]["google_news"]["coin_count_24h"] == 1
+    assert item["mentions"]["google_news"]["coin_count_7d"] == 1
     assert item["mentions"]["google_news"]["undated_matched_item_count"] == 0
-    assert item["mentions"]["google_news"]["headlines"][0]["matched_text"] in {"title", "body"}
+    assert item["mentions"]["google_news"]["headlines"][0]["matched_text"] == "coin"
     assert len(item["mentions"]["google_news"]["headlines"]) == 1
     assert item["mentions"]["google_news"]["headlines"][0]["title"].startswith("Crawlerpad Price")
     assert item["mentions"]["google_news"]["headlines"][0]["url"].startswith("https://news.google.com/")
@@ -96,7 +96,7 @@ def test_reddit_429_is_degraded_without_zero_or_retry_burst(monkeypatch):
     result = social_context.build_social_context(now=NOW, max_trending=1, enriched=1, previous=None)
     reddit = result["items"][0]["mentions"]["reddit"]
     assert reddit["status"] == "UNAVAILABLE"
-    assert reddit["relevant_count_24h"] is None and reddit["relevant_count_7d"] is None
+    assert reddit["coin_count_24h"] is None and reddit["coin_count_7d"] is None
     assert reddit["error_class"] == "HTTP_429" and reddit["reason"] == "rate-limited by Reddit"
     assert reddit["rate_limit_headers"] == {"x-ratelimit-used": "1", "x-ratelimit-remaining": "0.0", "x-ratelimit-reset": "43"}
     assert result["items"][0]["mentions"]["google_news"]["status"] == "FRESH"
@@ -104,7 +104,7 @@ def test_reddit_429_is_degraded_without_zero_or_retry_burst(monkeypatch):
     headers = [(FIXTURES / "reddit-429.headers.txt").read_text(), (FIXTURES / "reddit-429-second.headers.txt").read_text()]
     assert all("x-ratelimit-remaining: 0.0" in value.lower() for value in headers)
     assert result["status"] == "DEGRADED"
-    save_proof("reddit-429-report.json", {"reddit_status": reddit["status"], "counts": [reddit["relevant_count_24h"], reddit["relevant_count_7d"]], "error_class": reddit["error_class"], "reddit_attempts": 1, "google_news_status": result["items"][0]["mentions"]["google_news"]["status"]})
+    save_proof("reddit-429-report.json", {"reddit_status": reddit["status"], "counts": [reddit["coin_count_24h"], reddit["coin_count_7d"]], "error_class": reddit["error_class"], "reddit_attempts": 1, "google_news_status": result["items"][0]["mentions"]["google_news"]["status"]})
 
 
 def test_source_recovers_on_next_successful_capture(monkeypatch):
@@ -170,7 +170,7 @@ def test_previous_capture_reader_uses_v2_artifact(tmp_path, monkeypatch):
 
 
 def test_momentum_uses_previous_published_capture():
-    previous = {"status": "READY", "captured_at_utc": "2026-10-13T06:00:00Z", "identity_cache": {"crawlerpad": {"cached_at_utc": "2026-10-13T06:00:00Z", "platforms": {"solana": "CQCDTp8rsFV3PhaPeYjcCW5LdGTxi6jFx7eC3UXnpump"}}}, "items": [{"coingecko_id": "crawlerpad", "trending": {"rank": 3}, "market": {"volume_24h_usd": 40000000}, "mentions": {"google_news": {"status": "FRESH", "relevant_count_24h": 1, "relevant_count_7d": 1}, "reddit": {"status": "FRESH", "relevant_count_24h": 0, "relevant_count_7d": 0}}}]}
+    previous = {"status": "READY", "captured_at_utc": "2026-10-13T06:00:00Z", "identity_cache": {"crawlerpad": {"cached_at_utc": "2026-10-13T06:00:00Z", "platforms": {"solana": "CQCDTp8rsFV3PhaPeYjcCW5LdGTxi6jFx7eC3UXnpump"}}}, "items": [{"coingecko_id": "crawlerpad", "trending": {"rank": 3}, "market": {"volume_24h_usd": 40000000}, "mentions": {"google_news": {"status": "FRESH", "coin_count_24h": 1, "coin_count_7d": 1}, "reddit": {"status": "FRESH", "coin_count_24h": 0, "coin_count_7d": 0}}}]}
     monkeypatch = pytest.MonkeyPatch()
     try:
         monkeypatch.setattr(social_context, "_http_get", replay_response)
@@ -194,8 +194,8 @@ def test_unqueried_rank_has_no_carried_recent_counts(monkeypatch):
     prior_coin = trending["coins"][10]["item"]
     previous = {"status": "READY", "captured_at_utc": "2026-10-13T06:00:00Z", "items": [{
         "coingecko_id": prior_coin["id"], "trending": {"rank": 11}, "market": {"volume_24h_usd": 1},
-        "mentions": {"google_news": {"status": "FRESH", "relevant_count_24h": 9, "relevant_count_7d": 9},
-                     "reddit": {"status": "FRESH", "relevant_count_24h": 5, "relevant_count_7d": 5}},
+        "mentions": {"google_news": {"status": "FRESH", "coin_count_24h": 9, "coin_count_7d": 9},
+                     "reddit": {"status": "FRESH", "coin_count_24h": 5, "coin_count_7d": 5}},
     }]}
 
     def boundary(url, accept="application/json"):
@@ -210,8 +210,8 @@ def test_unqueried_rank_has_no_carried_recent_counts(monkeypatch):
     item = next(row for row in result["items"] if row["coingecko_id"] == prior_coin["id"])
     assert item["mentions"]["google_news"]["status"] == "NOT_QUERIED"
     assert item["mentions"]["reddit"]["status"] == "NOT_QUERIED"
-    assert item["mentions"]["google_news"]["relevant_count_24h"] is None
-    assert item["mentions"]["reddit"]["relevant_count_24h"] is None
+    assert item["mentions"]["google_news"]["coin_count_24h"] is None
+    assert item["mentions"]["reddit"]["coin_count_24h"] is None
     assert result["source_health"]["google_news"]["queried_count"] <= 10
     assert result["source_health"]["reddit"]["queried_count"] <= 10
 
@@ -332,14 +332,14 @@ def test_google_news_uses_recorded_final_redirect_url_and_reddit_quota_header(mo
     reddit = result["items"][0]["mentions"]["reddit"]
     assert reddit["status"] == "UNAVAILABLE"
     assert reddit["reason"] == "rate-limited by Reddit"
-    assert reddit["relevant_count_24h"] is None
+    assert reddit["coin_count_24h"] is None
 
 
 def test_prior_capture_time_must_be_earlier_and_comparable(monkeypatch):
     base = {"status": "READY", "captured_at_utc": "2026-10-13T07:00:00Z", "items": [{
         "coingecko_id": "crawlerpad", "trending": {"rank": 3}, "market": {"volume_24h_usd": 40000000},
-        "mentions": {"google_news": {"status": "FRESH", "relevant_count_24h": 1, "relevant_count_7d": 1},
-                     "reddit": {"status": "FRESH", "relevant_count_24h": 0, "relevant_count_7d": 0}},
+        "mentions": {"google_news": {"status": "FRESH", "coin_count_24h": 1, "coin_count_7d": 1},
+                     "reddit": {"status": "FRESH", "coin_count_24h": 0, "coin_count_7d": 0}},
     }]}
     monkeypatch.setattr(social_context, "_http_get", replay_response)
     monkeypatch.setattr(social_context.time, "sleep", lambda _seconds: None)
@@ -440,7 +440,7 @@ def test_site_contains_hype_navigation_private_link_and_market_only_wording():
 def test_public_bundle_and_hourly_workflow_include_v2_without_private_data():
     worker = (ROOT / "service-worker.js").read_text(encoding="utf-8")
     workflow = (ROOT / ".github" / "workflows" / "refresh-hourly.yml").read_text(encoding="utf-8")
-    assert "crypto-hourly-desk-v9-hype-v2" in worker
+    assert "crypto-hourly-desk-v9-hype-v3" in worker
     assert "social-context-v2-latest.json" in worker
     assert "git add data/social-context-v2-latest.json" in workflow
     public_files = [ROOT / name for name in ("index.html", "app.js", "styles.css", "manifest.json", "service-worker.js")]
