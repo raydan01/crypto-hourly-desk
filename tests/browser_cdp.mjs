@@ -401,20 +401,26 @@ try {
   assert.match(warningBadge, /reddit.*rate-limited/i, warningBadge);
   const listPng = await pageSend("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
   fs.mkdirSync(path.join(ROOT, ".proof"), { recursive: true });
-  fs.writeFileSync(path.join(ROOT, ".proof", "r9-hype-list.png"), Buffer.from(listPng.data, "base64"));
+  fs.writeFileSync(path.join(ROOT, ".proof", "r10-hype-list.png"), Buffer.from(listPng.data, "base64"));
   const openCard = async (symbol, file) => {
     await evaluate(`(() => { const card = [...document.querySelectorAll("#social-items .hype-card")].find(value => value.querySelector("summary").innerText.includes(${JSON.stringify(symbol)})); if (!card) throw new Error("Missing " + ${JSON.stringify(symbol)}); card.open = true; card.scrollIntoView({block: "start"}); })()`);
     await new Promise(resolve => setTimeout(resolve, 150));
     const shot = await pageSend("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
     fs.writeFileSync(path.join(ROOT, ".proof", file), Buffer.from(shot.data, "base64"));
   };
-  await openCard("CRAWLER", "r9-crawler-expanded.png");
+  await openCard("CRAWLER", "r10-crawler-expanded.png");
   const crawlerCard = await evaluate(`(() => { const card = [...document.querySelectorAll("#social-items .hype-card")].find(value => value.querySelector("summary").innerText.includes("CRAWLER")); card.open = true; return {text: card.querySelector(".hype-body").innerText, fomo: [...card.querySelectorAll(".fomo-observations")].map(value => value.innerText)}; })()`);
   assert.match(crawlerCard.text, /CoinGecko 24h change\s+unknown/);
   assert.match(crawlerCard.text, /DEX primary pair 24h change \(pumpswap\)\s+\+6,787%/);
   assert.equal((crawlerCard.text.match(/captured/g) || []).length, 1, crawlerCard.text);
   const allFomoText = await evaluate(`(() => { document.querySelectorAll("#social-items .hype-card").forEach(card => card.open = true); return [...document.querySelectorAll("#social-items .fomo-observations")].map(value => value.innerText).join(" "); })()`);
   assert.ok(!/[{]|"age_seconds"/.test(allFomoText), allFomoText);
+  assert.ok(crawlerCard.fomo.join(" ").includes("pumpswap"), JSON.stringify(crawlerCard.fomo));
+  assert.ok(!crawlerCard.fomo.join(" ").includes("meteora"), JSON.stringify(crawlerCard.fomo));
+  assert.ok(crawlerCard.fomo.join(" ").includes("AnrCHvfJUzMtos8DGjpT2XKurVPPYAVLDturASNwXcd4"), JSON.stringify(crawlerCard.fomo));
+  const renderedPairList = await evaluate(`(() => { const card = [...document.querySelectorAll("#social-items .hype-card")].find(value => value.querySelector("summary").innerText.includes("CRAWLER")); return card.querySelector(".pair-list").innerText; })()`);
+  assert.match(renderedPairList, /meteora/i, renderedPairList);
+  assert.ok(crawlerCard.fomo.every(line => /CoinGecko|DEX Screener/.test(line)), JSON.stringify(crawlerCard.fomo));
   const identityText = await evaluate(`(() => { const cards = [...document.querySelectorAll("#social-items .hype-card")]; const results = {}; for (const symbol of ["QTC", "HYPE"]) { const card = cards.find(value => value.querySelector("summary").innerText.includes(symbol)); card.open = true; results[symbol] = card.querySelector(".hype-body").innerText; } return results; })()`);
   for (const symbol of ["QTC", "HYPE"]) {
     assert.ok(identityText[symbol].includes("UNVERIFIED_FORMAT"), `${symbol}: ${identityText[symbol]}`);
@@ -423,9 +429,15 @@ try {
   assert.equal(await evaluate(`(() => { const cards = [...document.querySelectorAll("#social-items .hype-card")]; return ["QTC", "HYPE"].every(symbol => { const card = cards.find(value => value.querySelector("summary").innerText.includes(symbol)); return [...card.querySelectorAll(".contract-list a")].length === 0; }); })()`), true);
   const linkContrast = await evaluate(`(() => { const link = document.querySelector("#social-items .pair-row a"); const background = getComputedStyle(link.closest(".pair-row")).backgroundColor; const foreground = getComputedStyle(link).color; const luminance = color => { const values = color.match(/[\\d.]+/g).slice(0, 3).map(Number).map(value => value / 255).map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4); return 0.2126 * values[0] + 0.7152 * values[1] + 0.0722 * values[2]; }; const ratio = (a, b) => (Math.max(luminance(a), luminance(b)) + 0.05) / (Math.min(luminance(a), luminance(b)) + 0.05); return {foreground, background, ratio: ratio(foreground, background)}; })()`);
   assert.ok(linkContrast.ratio >= 4.5, JSON.stringify(linkContrast));
-  await openCard("PENGU", "r9-pengu-expanded.png");
+  await openCard("PENGU", "r10-pengu-expanded.png");
+  const penguCard = await evaluate(`(() => { const card = [...document.querySelectorAll("#social-items .hype-card")].find(value => value.querySelector("summary").innerText.includes("PENGU")); return {summary: card.querySelector("summary").innerText, observations: card.querySelector(".fomo-observations")?.innerText || "", pressureCount: card.querySelectorAll(".selling-pressure").length, flagCount: card.querySelectorAll(".fomo-flag").length}; })()`);
+  assert.match(penguCard.observations, /Sells outnumber buys 2 : 1 in 24h \(40 \/ 20\)/, JSON.stringify(penguCard));
+  assert.match(penguCard.observations, /meteora.*DEX Screener/i, JSON.stringify(penguCard));
+  assert.match(penguCard.summary, /1 FOMO flags/, JSON.stringify(penguCard));
+  assert.equal(penguCard.pressureCount, 1, JSON.stringify(penguCard));
+  assert.equal(penguCard.flagCount, 1, JSON.stringify(penguCard));
   assert.deepEqual(exceptions, []);
-  console.log(JSON.stringify({ browser: "Microsoft Edge headless CDP", viewport: "375x812 final acceptance", initial, quickFailure, hanging, failedHourlyArtifactRequests, tradingFailureState, expanded, dexStatusChecks, trading, reverse, reverseTrading, deepPartial, quickColdStart, deepColdStart, liveUi, firstRow, crawlerCard, failedDailyArtifactRequests, successfulTradingArtifactLoads, screenshots: [".proof/r9-hype-list.png", ".proof/r9-crawler-expanded.png", ".proof/r9-pengu-expanded.png"], exceptions }, null, 2));
+  console.log(JSON.stringify({ browser: "Microsoft Edge headless CDP", viewport: "375x812 final acceptance", initial, quickFailure, hanging, failedHourlyArtifactRequests, tradingFailureState, expanded, dexStatusChecks, trading, reverse, reverseTrading, deepPartial, quickColdStart, deepColdStart, liveUi, firstRow, crawlerCard, penguCard, failedDailyArtifactRequests, successfulTradingArtifactLoads, screenshots: [".proof/r10-hype-list.png", ".proof/r10-crawler-expanded.png", ".proof/r10-pengu-expanded.png"], exceptions }, null, 2));
 } finally {
   try { shutdownBrowser?.(); } catch {}
   try { ws?.close(); } catch {}

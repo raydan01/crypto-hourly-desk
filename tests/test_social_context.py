@@ -255,3 +255,19 @@ def test_v2_validation_requires_all_mention_categories():
     value["items"][0]["mentions"]["google_news"]["listing_count_7d"] = 0
     del value["items"][0]["mentions"]["google_news"]["related_count_7d"]
     assert not social_context.validate_social_context(value)
+
+
+def test_fomo_observations_are_primary_pair_scoped_with_pair_identity(monkeypatch):
+    now = datetime(2026, 10, 13, 8, tzinfo=timezone.utc)
+    monkeypatch.setattr(social_context, "_json", lambda url, source: {"coins": [{"item": {"id": "coin", "name": "Coin", "symbol": "COIN", "data": {"total_volume": 100, "market_cap": 500}}}]})
+    monkeypatch.setattr(social_context, "_identity", lambda coin_id, cached, captured: {"status": "KNOWN", "contracts": [{"chain": "solana", "address": "token", "dex_chain": "solana"}]})
+    monkeypatch.setattr(social_context, "_mentions", lambda source, name, symbol, captured: {"status": "FRESH", "coin_count_24h": 0, "coin_count_7d": 0, "related_count_24h": 0, "related_count_7d": 0, "listing_count_7d": 0, "headlines": [], "related_headlines": []})
+    primary = {"dex_id": "pumpswap", "pair_address": "primary-address", "liquidity_usd": 1000, "fdv_usd": 10000, "age_seconds": 90000, "buys_sells_by_period": {"h24": {"buys": 50, "sells": 20}}, "price_change_by_period": {"h24": 0}}
+    secondary = {"dex_id": "meteora", "pair_address": "secondary-address", "liquidity_usd": 10, "fdv_usd": 10000, "age_seconds": 1000, "buys_sells_by_period": {"h24": {"buys": 20, "sells": 40}}, "price_change_by_period": {"h24": 0}}
+    monkeypatch.setattr(social_context, "_dex", lambda contract, captured: [dict(primary), dict(secondary)])
+
+    item = social_context.build_social_context(max_trending=1, enriched=1, previous={"items": []}, now=now)["items"][0]
+    observations = item["fomo_watch"]["observations"]
+    assert [row["kind"] for row in observations] == ["BUY_SELL_IMBALANCE", "SELLING_PRESSURE"]
+    assert [(row["dex_id"], row["pair_address"]) for row in observations] == [("pumpswap", "primary-address"), ("meteora", "secondary-address")]
+    assert all(row["source"] for row in observations)

@@ -541,16 +541,25 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
         market = {"price_usd": _number(data.get("price_value", data.get("price"))), "market_cap_usd": market_cap, "volume_24h_usd": volume, "volume_market_cap_ratio": volume / market_cap if isinstance(volume, (int, float)) and isinstance(market_cap, (int, float)) and market_cap else None, "change_24h_pct": market_change, "change_24h_source": "CoinGecko /coins market_data" if market_change is not None else None, "captured_at_utc": _iso(captured_at)}
         observations = []
         for pair in dex_pairs:
+            is_primary = pair.get("is_primary") is True
+            pair_identity = {"pair_address": pair.get("pair_address"), "dex_id": pair.get("dex_id")}
+            pair_source = f"{pair.get('dex_id') or 'DEX'} DEX Screener"
             liq = pair.get("liquidity_usd")
             denom = pair.get("fdv_usd") or pair.get("market_cap_usd") or market_cap
-            vol24 = (pair.get("volume_by_period") or {}).get("h24")
             tx24 = (pair.get("buys_sells_by_period") or {}).get("h24") or {}
             buys, sells = tx24.get("buys"), tx24.get("sells")
-            if pair.get("age_seconds") is not None and pair["age_seconds"] < 86400: observations.append({"kind": "PAIR_UNDER_24H", "source": "DEX Screener", "age_seconds": pair["age_seconds"], "pair_age_seconds": pair["age_seconds"]})
-            if isinstance(liq, (int, float)) and isinstance(denom, (int, float)) and denom > 0 and liq / denom < .05: observations.append({"kind": "LIQUIDITY_UNDER_5_PERCENT", "source": "DEX Screener", "age_seconds": pair.get("age_seconds"), "liquidity_usd": liq, "fdv_or_market_cap_usd": denom, "ratio_pct": liq / denom * 100})
-            if isinstance(buys, (int, float)) and isinstance(sells, (int, float)) and min(buys, sells) >= 0 and max(buys, sells) >= 20 and max(buys, sells) >= 1.5 * max(1, min(buys, sells)): observations.append({"kind": "BUY_SELL_IMBALANCE", "source": "DEX Screener 24h transactions", "age_seconds": pair.get("age_seconds"), "buys_24h": buys, "sells_24h": sells})
+            if is_primary and pair.get("age_seconds") is not None and pair["age_seconds"] < 86400:
+                observations.append({"kind": "PAIR_UNDER_24H", "source": pair_source, "age_seconds": pair["age_seconds"], "pair_age_seconds": pair["age_seconds"], **pair_identity})
+            if is_primary and isinstance(liq, (int, float)) and isinstance(denom, (int, float)) and denom > 0 and liq / denom < .05:
+                observations.append({"kind": "LIQUIDITY_UNDER_5_PERCENT", "source": pair_source, "age_seconds": pair.get("age_seconds"), "liquidity_usd": liq, "fdv_or_market_cap_usd": denom, "ratio_pct": liq / denom * 100, **pair_identity})
+            if isinstance(buys, (int, float)) and isinstance(sells, (int, float)) and min(buys, sells) >= 0 and max(buys, sells) >= 20:
+                if buys >= 1.5 * max(1, sells) and is_primary:
+                    observations.append({"kind": "BUY_SELL_IMBALANCE", "source": f"{pair_source} 24h transactions", "age_seconds": pair.get("age_seconds"), "buys_24h": buys, "sells_24h": sells, **pair_identity})
+                elif sells >= 1.5 * max(1, buys):
+                    observations.append({"kind": "SELLING_PRESSURE", "source": f"{pair_source} 24h transactions", "age_seconds": pair.get("age_seconds"), "buys_24h": buys, "sells_24h": sells, **pair_identity})
             pair_change = (pair.get("price_change_by_period") or {}).get("h24")
-            if pair.get("is_primary") and isinstance(pair_change, (int, float)) and abs(pair_change) > 100: observations.append({"kind": "DEX_PRICE_MOVE", "source": f"{pair.get('dex_id') or 'DEX'} DEX Screener 24h price move", "age_seconds": pair.get("age_seconds"), "change_24h_pct": pair_change})
+            if is_primary and isinstance(pair_change, (int, float)) and abs(pair_change) > 100:
+                observations.append({"kind": "DEX_PRICE_MOVE", "source": f"{pair_source} 24h price move", "age_seconds": pair.get("age_seconds"), "change_24h_pct": pair_change, **pair_identity})
         if isinstance(volume, (int, float)) and isinstance(market_cap, (int, float)) and volume > market_cap: observations.append({"kind": "VOLUME_ABOVE_MARKET_CAP", "source": "CoinGecko 24h volume and market cap", "age_seconds": 0, "volume_24h_usd": volume, "market_cap_usd": market_cap})
         items.append({"coingecko_id": coin_id, "name": name, "symbol": symbol, "observed_at_utc": _iso(captured_at), "trending": {"rank": rank, "previous_rank": old.get("trending", {}).get("rank") if comparable else None, "change": rank_change, "state": state, "window": "rolling 24h"}, "market": market, "identity": identity, "mentions": {"google_news": news, "reddit": reddit}, "dex_pairs": dex_pairs, "momentum": {"rank_change": rank_change, "volume_change_pct": volume_change, "mention_change_by_source": mention_changes, "comparison_at_utc": comparison, "state": state}, "fomo_watch": {"status": "WATCH_ONLY" if observations else "NO_OBSERVATION" if dex_pairs else "UNKNOWN", "observations": observations, "disclaimer": "Descriptive observations only; no score, direction, or trade gate."}})
     for source in ("google_news", "reddit"):
