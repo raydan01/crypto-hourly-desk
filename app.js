@@ -1,11 +1,12 @@
 const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? "").replace(/[&<>\"]/g, character => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[character]));
 const price = value => value == null ? "n/a" : Number(value).toLocaleString(undefined, { maximumSignificantDigits: 8 });
-const APP_BUILD_ID = "hype-v3";
+const APP_BUILD_ID = "hype-v4";
 const MAX_LIVE_QUOTE_AGE_SECONDS = 120;
 const MAX_HYPE_AGE_SECONDS = 7200;
 let snapshot = null;
 let snapshotsByMode = {};
+let artifactRefreshByMode = {};
 let hypeSnapshot = null;
 let refreshFailures = [];
 let activeMode = "hourly";
@@ -171,7 +172,7 @@ function renderHype(social) {
     const headlines = (data.headlines || []).map(row => `<li><a href="${escapeHtml(row.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(row.title)}</a><span>${ageAt(row.published_at_utc)} · ${escapeHtml(row.matched_text)} matched</span></li>`).join("");
     const relatedHeadlines = (data.related_headlines || []).map(row => `<li><a href="${escapeHtml(row.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(row.title)}</a><span>${ageAt(row.published_at_utc)}</span></li>`).join("");
     const related = `<div class="related-buzz"><strong>Related crypto buzz (headlines using '${escapeHtml(itemName)}', not necessarily this coin): ${Number(data.related_count_7d || 0)} in 7d</strong>${relatedHeadlines ? `<ul>${relatedHeadlines}</ul>` : "<p>No dated related headlines.</p>"}</div>`;
-    return `<div class="mention-block"><strong>${label}: About this coin</strong><p>${Number(data.coin_count_24h || 0)} matching items / 24h / ${Number(data.coin_count_7d || 0)} in 7d / newest ${ageAt(data.newest_published_at_utc)} / capture ${escapeHtml(data.query_at_utc ? new Date(data.query_at_utc).toLocaleString() : "unknown")}</p>${Number(data.undated_matched_item_count || 0) ? `<p>${Number(data.undated_matched_item_count)} matching results excluded because publication time is unknown.</p>` : ""}${headlines ? `<ul>${headlines}</ul>` : "<p>No dated about-this-coin headlines.</p>"}${related}</div>`;
+    return `<div class="mention-block"><strong>${label}: About this coin</strong><p>${Number(data.coin_count_24h || 0)} matching items / 24h / ${Number(data.coin_count_7d || 0)} in 7d / newest ${ageAt(data.newest_published_at_utc)} / capture ${escapeHtml(data.query_at_utc ? new Date(data.query_at_utc).toLocaleString() : "unknown")}</p><p>Listed on ${Number(data.listing_count_7d || 0)} price-tracker pages (7d)</p>${Number(data.undated_matched_item_count || 0) ? `<p>${Number(data.undated_matched_item_count)} matching results excluded because publication time is unknown.</p>` : ""}${headlines ? `<ul>${headlines}</ul>` : "<p>No dated about-this-coin headlines.</p>"}${related}</div>`;
   };
   const identity = item => {
     const contracts = item.identity?.contracts || [];
@@ -328,6 +329,7 @@ function recalculateLiveRanking(targetSnapshot = snapshot) {
 }
 
 async function refreshAllSnapshots() {
+  artifactRefreshByMode = {};
   const results = await Promise.all(Object.entries(modeConfig).map(async ([mode, config]) => {
     try {
       return {mode, snapshot: await fetchFreshJson(config.file)};
@@ -338,9 +340,13 @@ async function refreshAllSnapshots() {
   const next = {...snapshotsByMode};
   const failures = [];
   for (const result of results) {
-    if (result.snapshot) next[result.mode] = {...result.snapshot, artifact_refresh_status: "FRESH"};
+    if (result.snapshot) {
+      next[result.mode] = {...result.snapshot, artifact_refresh_status: "FRESH"};
+      artifactRefreshByMode[result.mode] = {status: "FRESH", generated_at_utc: result.snapshot.generated_at_utc || null};
+    }
     else {
       if (next[result.mode]) next[result.mode] = {...next[result.mode], artifact_refresh_status: "FAILED"};
+      artifactRefreshByMode[result.mode] = {status: "FAILED", generated_at_utc: next[result.mode]?.generated_at_utc || null};
       failures.push(`${modeConfig[result.mode].title}: artifact refresh failed after 3 attempts (${result.error})`);
     }
   }
@@ -349,6 +355,13 @@ async function refreshAllSnapshots() {
   refreshFailures = failures;
   if (!snapshot) throw new Error(failures.join(" ") || "No schedule snapshot is available.");
   return failures;
+}
+
+function artifactRefreshReport() {
+  const entries = Object.entries(modeConfig).map(([mode, config]) => [artifactRefreshByMode[mode] || {status: "FAILED", generated_at_utc: null}, config]);
+  const fresh = entries.filter(([result]) => result.status === "FRESH").length;
+  const failures = entries.filter(([result]) => result.status !== "FRESH").map(([result, config]) => `${config.title} ${result.generated_at_utc ? `artifact captured ${result.generated_at_utc}` : "no prior capture"}`);
+  return {fresh, total: entries.length, failures};
 }
 
 async function loadHype() {
@@ -489,13 +502,10 @@ async function runDeepScan() {
     Object.values(snapshotsByMode).forEach(targetSnapshot => { targetSnapshot.deep_scan_updated_at_utc = new Date().toISOString(); targetSnapshot.deep_scan_duration_seconds = Number(((performance.now() - startedAt) / 1000).toFixed(1)); targetSnapshot.deep_scan_source_as_of_utc = finishedAt; targetSnapshot.deep_scan_completed = completed; targetSnapshot.deep_scan_failed = failed; });
     snapshot = snapshotsByMode[activeMode];
     render();
-    const scheduleArtifacts = Object.entries(snapshotsByMode);
-    const freshArtifacts = scheduleArtifacts.filter(([, item]) => item.artifact_refresh_status !== "FAILED").length;
-    const failedArtifacts = scheduleArtifacts.filter(([, item]) => item.artifact_refresh_status === "FAILED");
-    const artifactFailures = failedArtifacts.map(([mode, item]) => `${modeConfig[mode].title} artifact captured ${item.generated_at_utc || "time unknown"}`);
-    $("#scan-status").textContent = failedArtifacts.length ? "DEEP SCAN PARTIAL" : failed ? "DEEP SCAN DEGRADED" : "DEEP SCAN COMPLETE";
-    $("#scan-summary").textContent += ` Deep scan completed in ${snapshot.deep_scan_duration_seconds}s across all schedules: ${completed}/${total} fresh histories, ${failed} failed; schedule artifacts refreshed (${freshArtifacts}/${scheduleArtifacts.length}).`;
-    if (artifactFailures.length) $("#scan-summary").textContent += ` Failed schedule artifacts: ${artifactFailures.join("; ")}.`;
+    const artifactReport = artifactRefreshReport();
+    $("#scan-status").textContent = artifactReport.failures.length ? "DEEP SCAN PARTIAL" : failed ? "DEEP SCAN DEGRADED" : "DEEP SCAN COMPLETE";
+    $("#scan-summary").textContent += ` Deep scan completed in ${snapshot.deep_scan_duration_seconds}s across all schedules: ${completed}/${total} fresh histories, ${failed} failed; schedule artifacts refreshed (${artifactReport.fresh}/${artifactReport.total}).`;
+    if (artifactReport.failures.length) $("#scan-summary").textContent += ` Failed schedule artifacts: ${artifactReport.failures.join("; ")}.`;
   } catch (error) {
     if (!snapshot?.live_quote_complete) renderDataStale(`Deep scan could not verify a complete live quote batch: ${error.message}`);
     else { $("#scan-status").textContent = "DEEP SCAN FAILED"; $("#scan-summary").textContent = `Deep scan could not complete: ${error.message}`; }
@@ -574,8 +584,9 @@ async function boot({manual = false} = {}) {
     const freshness = liveFreshness(snapshot);
     if (!freshness.ok) throw new Error(freshness.reason);
     render();
-    const freshArtifacts = Object.values(snapshotsByMode).filter(item => item.artifact_refresh_status !== "FAILED").length;
-    const artifactSummary = `Schedule artifacts refreshed (${freshArtifacts}/${Object.keys(modeConfig).length})`;
+    const artifactReport = artifactRefreshReport();
+    const artifactSummary = `Schedule artifacts refreshed (${artifactReport.fresh}/${artifactReport.total})`;
+    if (artifactReport.failures.length) $("#scan-summary").textContent += ` Failed schedule artifacts: ${artifactReport.failures.join("; ")}.`;
     $("#scan-summary").textContent += ` · ${artifactSummary}; live quote freshness is reported separately; up to 3 attempts per source.`;
     if (refreshFailures.length) $("#scan-summary").textContent += ` · REFRESH DEGRADED: ${refreshFailures.join(" | ")}`;
     if (manual && previousTimestamp && previousTimestamp === snapshot.generated_at_utc) $("#scan-status").textContent = `LIVE ${modeConfig[activeMode].title}`;

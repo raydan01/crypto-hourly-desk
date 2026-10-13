@@ -89,6 +89,11 @@ const server = http.createServer((request, response) => {
       return;
     }
   }
+  if ((scenario === "cold-start-quick" || scenario === "cold-start-deep") && pathname === "/data/market-opportunities-daily-latest.json") {
+    failedDailyArtifactRequests += 1;
+    response.writeHead(404).end("missing daily fixture from cold start");
+    return;
+  }
   const target = path.resolve(ROOT, `.${pathname}`);
   if (target !== ROOT && !target.startsWith(ROOT + path.sep)) {
     response.writeHead(403).end("forbidden");
@@ -251,10 +256,11 @@ try {
   await evaluate(`document.querySelector("#social-items .hype-card").open = true`);
   const expanded = await evaluate(`({width: document.documentElement.scrollWidth, headlines: document.querySelectorAll("#social-items .hype-card:first-child .headlines a").length, pairs: document.querySelectorAll("#social-items .pair-row").length, reddit: document.querySelector("#social-items").innerText.includes("Reddit unavailable (rate-limited)"), tiers: document.querySelector("#social-items .hype-card:first-child .hype-body").innerText, contract: document.querySelector("#social-items .contract-list code")?.textContent})`);
   assert.ok(expanded.width <= 390, JSON.stringify(expanded));
-  assert.equal(expanded.headlines, 1, JSON.stringify(expanded));
+  assert.equal(expanded.headlines, 0, JSON.stringify(expanded));
   assert.equal(expanded.pairs, 2, JSON.stringify(expanded));
   assert.equal(expanded.reddit, true, JSON.stringify(expanded));
   assert.ok(expanded.tiers.includes("About this coin"), expanded.tiers);
+  assert.ok(expanded.tiers.includes("Listed on 1 price-tracker pages (7d)"), expanded.tiers);
   assert.ok(expanded.tiers.includes("Related crypto buzz (headlines using 'Crawlerpad', not necessarily this coin): 5 in 7d"), expanded.tiers);
   assert.ok(expanded.tiers.includes("Crawlerpad news with crypto context"), expanded.tiers);
   assert.equal(expanded.contract, "CQCDTp8rsFV3PhaPeYjcCW5LdGTxi6jFx7eC3UXnpump");
@@ -329,8 +335,32 @@ try {
   assert.ok(deepPartial.summary.includes("schedule artifacts refreshed (2/3)"), JSON.stringify(deepPartial));
   assert.match(deepPartial.summary, /artifact captured \d{4}-\d{2}-\d{2}T/, JSON.stringify(deepPartial));
   assert.ok(successfulTradingArtifactLoads > 0, `Trading artifacts were not served successfully: ${successfulTradingArtifactLoads}`);
+  await pageSend("Page.navigate", { url: `http://127.0.0.1:${sitePort}/index.html?testScenario=cold-start-quick` });
+  const quickColdStartDeadline = Date.now() + 10000;
+  let quickColdStart;
+  while (Date.now() < quickColdStartDeadline) {
+    quickColdStart = await evaluate(`({status: document.querySelector("#scan-status")?.textContent, summary: document.querySelector("#scan-summary")?.textContent})`);
+    if (/schedule artifacts refreshed \(2\/3\)/i.test(quickColdStart.summary)) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.match(quickColdStart.summary, /schedule artifacts refreshed \(2\/3\)/i, JSON.stringify(quickColdStart));
+  assert.ok(quickColdStart.summary.includes("WEEKLY TRADING no prior capture"), JSON.stringify(quickColdStart));
+  await pageSend("Page.navigate", { url: `http://127.0.0.1:${sitePort}/index.html?testScenario=cold-start-deep` });
+  const coldDeepReadyDeadline = Date.now() + 10000;
+  while (Date.now() < coldDeepReadyDeadline && await evaluate(`document.querySelector("#refresh-button")?.disabled`)) await new Promise(resolve => setTimeout(resolve, 50));
+  await evaluate(`document.querySelector("#deep-scan-button").click()`);
+  const coldDeepDeadline = Date.now() + 25000;
+  let deepColdStart;
+  while (Date.now() < coldDeepDeadline) {
+    deepColdStart = await evaluate(`({status: document.querySelector("#scan-status")?.textContent, summary: document.querySelector("#scan-summary")?.textContent})`);
+    if (deepColdStart.status === "DEEP SCAN PARTIAL") break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.equal(deepColdStart.status, "DEEP SCAN PARTIAL", JSON.stringify(deepColdStart));
+  assert.ok(deepColdStart.summary.includes("schedule artifacts refreshed (2/3)"), JSON.stringify(deepColdStart));
+  assert.ok(deepColdStart.summary.includes("WEEKLY TRADING no prior capture"), JSON.stringify(deepColdStart));
   assert.deepEqual(exceptions, []);
-  console.log(JSON.stringify({ browser: "Microsoft Edge headless CDP", viewport: "390x844", initial, quickFailure, hanging, failedHourlyArtifactRequests, tradingFailureState, expanded, dexStatusChecks, trading, reverse, reverseTrading, deepPartial, failedDailyArtifactRequests, successfulTradingArtifactLoads, exceptions }, null, 2));
+  console.log(JSON.stringify({ browser: "Microsoft Edge headless CDP", viewport: "390x844", initial, quickFailure, hanging, failedHourlyArtifactRequests, tradingFailureState, expanded, dexStatusChecks, trading, reverse, reverseTrading, deepPartial, quickColdStart, deepColdStart, failedDailyArtifactRequests, successfulTradingArtifactLoads, exceptions }, null, 2));
 } finally {
   try { shutdownBrowser?.(); } catch {}
   try { ws?.close(); } catch {}

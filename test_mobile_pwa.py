@@ -63,18 +63,16 @@ def test_production_default_collector_replays_real_shape_http_boundary(monkeypat
     assert result["research_only"] and result["trade_authorization"] is False and result["execution_allowed"] is False
     assert result["items"][0]["coingecko_id"] == "crawlerpad"
     item = result["items"][0]
-    assert item["mentions"]["google_news"]["coin_count_24h"] == 1
-    assert item["mentions"]["google_news"]["coin_count_7d"] == 1
+    assert item["mentions"]["google_news"]["coin_count_24h"] == 0
+    assert item["mentions"]["google_news"]["coin_count_7d"] == 0
+    assert item["mentions"]["google_news"]["listing_count_7d"] == 1
     assert item["mentions"]["google_news"]["undated_matched_item_count"] == 0
-    assert item["mentions"]["google_news"]["headlines"][0]["matched_text"] == "coin"
-    assert len(item["mentions"]["google_news"]["headlines"]) == 1
-    assert item["mentions"]["google_news"]["headlines"][0]["title"].startswith("Crawlerpad Price")
-    assert item["mentions"]["google_news"]["headlines"][0]["url"].startswith("https://news.google.com/")
+    assert item["mentions"]["google_news"]["headlines"] == []
     assert item["identity"]["contracts"][0]["address"] == "CQCDTp8rsFV3PhaPeYjcCW5LdGTxi6jFx7eC3UXnpump"
     assert len(item["dex_pairs"]) == 2
     assert item["dex_pairs"][0]["chain"] == "solana"
     save_proof("collector-production-default.json", {"fixture_origin": "trimmed real public responses recorded 2026-10-12", "collector_output": result})
-    save_proof("mention-relevance-report.md", "# Mention relevance replay\n\nReplay used the recorded Crawlerpad Google News RSS response. It retained the one dated, directly matching item in the 24-hour and 7-day windows; unrelated results were excluded.\n")
+    save_proof("mention-relevance-report.md", "# Mention relevance replay\n\nReplay used the recorded Crawlerpad Google News RSS response. It classified the dated price page as one separate listing and excluded it from both news tiers.\n")
     save_proof("detail-card-fixtures.md", "# Detail card fixture replay\n\nReplay used the recorded Crawlerpad identity and DEX Screener responses. Both recorded Solana pairs are retained.\n")
 
 
@@ -170,7 +168,7 @@ def test_previous_capture_reader_uses_v2_artifact(tmp_path, monkeypatch):
 
 
 def test_momentum_uses_previous_published_capture():
-    previous = {"status": "READY", "captured_at_utc": "2026-10-13T06:00:00Z", "identity_cache": {"crawlerpad": {"cached_at_utc": "2026-10-13T06:00:00Z", "platforms": {"solana": "CQCDTp8rsFV3PhaPeYjcCW5LdGTxi6jFx7eC3UXnpump"}}}, "items": [{"coingecko_id": "crawlerpad", "trending": {"rank": 3}, "market": {"volume_24h_usd": 40000000}, "mentions": {"google_news": {"status": "FRESH", "coin_count_24h": 1, "coin_count_7d": 1}, "reddit": {"status": "FRESH", "coin_count_24h": 0, "coin_count_7d": 0}}}]}
+    previous = {"status": "READY", "captured_at_utc": "2026-10-13T06:00:00Z", "identity_cache": {"crawlerpad": {"cached_at_utc": "2026-10-13T06:00:00Z", "platforms": {"solana": "CQCDTp8rsFV3PhaPeYjcCW5LdGTxi6jFx7eC3UXnpump"}}}, "items": [{"coingecko_id": "crawlerpad", "trending": {"rank": 3}, "market": {"volume_24h_usd": 40000000}, "mentions": {"google_news": {"status": "FRESH", "coin_count_24h": 0, "coin_count_7d": 0, "listing_count_7d": 1}, "reddit": {"status": "FRESH", "coin_count_24h": 0, "coin_count_7d": 0, "listing_count_7d": 0}}}]}
     monkeypatch = pytest.MonkeyPatch()
     try:
         monkeypatch.setattr(social_context, "_http_get", replay_response)
@@ -440,7 +438,7 @@ def test_site_contains_hype_navigation_private_link_and_market_only_wording():
 def test_public_bundle_and_hourly_workflow_include_v2_without_private_data():
     worker = (ROOT / "service-worker.js").read_text(encoding="utf-8")
     workflow = (ROOT / ".github" / "workflows" / "refresh-hourly.yml").read_text(encoding="utf-8")
-    assert "crypto-hourly-desk-v9-hype-v3" in worker
+    assert "crypto-hourly-desk-v10-hype-v4" in worker
     assert "social-context-v2-latest.json" in worker
     assert "git add data/social-context-v2-latest.json" in workflow
     public_files = [ROOT / name for name in ("index.html", "app.js", "styles.css", "manifest.json", "service-worker.js")]
