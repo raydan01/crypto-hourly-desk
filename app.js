@@ -1,8 +1,9 @@
 const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? "").replace(/[&<>\"]/g, character => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[character]));
 const price = value => value == null ? "n/a" : Number(value).toLocaleString(undefined, { maximumSignificantDigits: 8 });
-const APP_BUILD_ID = "full-refresh-v1";
+const APP_BUILD_ID = "hype-v2";
 const MAX_LIVE_QUOTE_AGE_SECONDS = 120;
+const MAX_HYPE_AGE_SECONDS = 7200;
 let snapshot = null;
 let snapshotsByMode = {};
 let refreshFailures = [];
@@ -26,6 +27,7 @@ function utcAgeSeconds(value) {
 }
 
 function renderDataStale(reason) {
+  renderSocial(snapshot?.social_context || {});
   $("#scan-status").textContent = "DATA STALE";
   $("#scan-summary").textContent = `${reason} Build ${APP_BUILD_ID}. No setup or price map is actionable until a complete live refresh succeeds.`;
   $("#opportunities").innerHTML = `<div class="panel"><strong>DATA STALE — NO SIGNAL</strong><p class="muted">${escapeHtml(reason)}</p><p class="muted">Required: ${MAX_LIVE_QUOTE_AGE_SECONDS}-second maximum quote age, complete candidate coverage, and compatible fresh range data.</p></div>`;
@@ -114,6 +116,7 @@ function orderDisplayChoices(items) {
 }
 
 function render() {
+  renderSocial(snapshot?.social_context || {});
   const freshness = liveFreshness();
   if (!freshness.ok) {
     renderDataStale(freshness.reason);
@@ -129,22 +132,69 @@ function render() {
   const counts = snapshot.selection_counts || {};
   const selection = counts.watchlist_selected != null ? ` · ${counts.watchlist_selected} watched + ${counts.discovery_selected} discovery` : "";
   const directionLabel = activeDirection === "all" ? "all directions" : activeDirection === "LONG_RESEARCH" ? "long opportunities" : activeDirection === "SHORT_RESEARCH" ? "short opportunities" : "avoid/watch markets";
-  $("#scan-summary").textContent = `${choices.length} ${directionLabel} ranked by combined market + social score · ${setupCount} setup${setupCount === 1 ? "" : "s"} cleared the latest screen${selection} · captured ${new Date(snapshot.generated_at_utc).toLocaleString()} · WATCH ONLY cards are monitoring-only.`;
+  $("#scan-summary").textContent = `${choices.length} ${directionLabel} ranked by market-only score · ${setupCount} setup${setupCount === 1 ? "" : "s"} cleared the latest screen${selection} · captured ${new Date(snapshot.generated_at_utc).toLocaleString()} · WATCH ONLY cards are monitoring-only.`;
   const artifactAge = utcAgeSeconds(snapshot.generated_at_utc);
   $("#scan-summary").textContent += ` Â· live quotes ${snapshot.live_quote_source || "unknown source"}, ${freshness.age.toFixed(0)}s old (${snapshot.live_quote_count}/${snapshot.live_quote_expected_count}) Â· artifact age ${artifactAge == null ? "unknown" : `${Math.max(0, artifactAge).toFixed(0)}s`} Â· build ${APP_BUILD_ID}.`;
   $("#opportunities").innerHTML = choices.length ? choices.map(card).join("") : `<div class="panel"><strong>No directional setup cleared this hour.</strong><p class="muted">${bearish} bearish candidate${bearish === 1 ? " was" : "s were"} found in the latest scan. All labels are monitoring-only until independently verified.</p></div>`;
-  renderSocial(snapshot.social_context || {});
 }
 
 function renderSocial(social) {
-  const items = (social.items || []).slice(0, 10);
+  const items = (social.items || []).slice(0, 20);
   const health = social.source_health || {};
-  const sourceStatuses = Object.values(health).map(value => String(value.status || "UNKNOWN").toUpperCase());
-  const hasDegradedSource = sourceStatuses.some(status => status !== "FRESH");
-  $("#social-status").textContent = hasDegradedSource ? "DEGRADED SOURCES" : String(social.status || "NO DATA").replaceAll("_", " ");
-  $("#social-summary").textContent = items.length ? `${items.length} attention-ranked projects captured ${social.captured_at_utc ? new Date(social.captured_at_utc).toLocaleString() : ""}.` : "No social/news context was returned.";
-  $("#social-health").innerHTML = Object.entries(health).map(([name, value]) => `<span>${escapeHtml(name.replaceAll("_", " "))}: <strong>${escapeHtml(value.status || "UNKNOWN")}${value.coverage == null ? "" : ` · ${Number(value.coverage).toFixed(0)}%`}</strong></span>`).join("");
-  $("#social-items").innerHTML = items.length ? items.map(item => `<article class="social-item"><div><strong>${escapeHtml(item.symbol)}</strong><span>${escapeHtml(item.name)}</span></div><b>${Number(item.attention_score || 0).toFixed(0)} attention</b><small>CoinGecko #${item.rank} · News ${item.source_counts?.google_news || 0} · Reddit ${item.source_counts?.reddit || 0}</small></article>`).join("") : `<p class="muted">Social sources are unavailable or still refreshing.</p>`;
+  const degraded = Object.values(health).some(value => ["DEGRADED", "FAILED"].includes(String(value.status).toUpperCase()));
+  const captureAge = utcAgeSeconds(social.captured_at_utc);
+  const stale = captureAge == null || captureAge < -5 || captureAge > MAX_HYPE_AGE_SECONDS;
+  $("#social-status").textContent = stale ? "STALE DATA" : degraded ? "DEGRADED SOURCES" : String(social.status || "NO DATA").replaceAll("_", " ");
+  const captured = social.captured_at_utc ? new Date(social.captured_at_utc).toLocaleString() : "capture time unknown";
+  const captureAgeLabel = captureAge == null ? "age unknown" : captureAge < 3600 ? `${Math.max(0, Math.floor(captureAge / 60))}m old` : `${(Math.max(0, captureAge) / 3600).toFixed(1)}h old`;
+  const attribution = social.attribution || "CoinGecko attribution applies when its data is present.";
+  $("#social-summary").textContent = items.length ? `${items.length} CoinGecko trending projects · capture ${captured} (${captureAgeLabel}; stale after 2h). Counts below are matching, dated RSS items; collector target is hourly. ${attribution}` : `No Hype data available · capture ${captured} (${captureAgeLabel}). ${attribution}`;
+  $("#social-health").innerHTML = Object.entries(health).map(([name, value]) => `<span>${escapeHtml(name.replaceAll("_", " "))}: <strong>${escapeHtml(value.status || "UNKNOWN")}</strong></span>`).join("");
+  const formatAge = seconds => seconds == null || !Number.isFinite(seconds) ? "age unknown" : seconds < 3600 ? `${Math.floor(seconds / 60)}m ago` : seconds < 86400 ? `${(seconds / 3600).toFixed(1)}h ago` : `${(seconds / 86400).toFixed(1)}d ago`;
+  const ageAt = timestamp => { const parsed = Date.parse(timestamp || ""); if (!Number.isFinite(parsed)) return "age unknown"; const seconds = (Date.now() - parsed) / 1000; return seconds < -5 ? "age unknown" : formatAge(Math.max(0, seconds)); };
+  const newestMentionAt = item => [item.mentions?.google_news?.newest_published_at_utc, item.mentions?.reddit?.newest_published_at_utc].filter(Boolean).sort((left, right) => Date.parse(right) - Date.parse(left))[0] || null;
+  const count = (mention, window) => mention?.status === "FRESH" ? String(mention[`relevant_count_${window}`] ?? "unknown") : "unknown";
+  const money = value => value == null ? "unknown" : `$${Number(value).toLocaleString(undefined, {maximumSignificantDigits: 8})}`;
+  const mention = (source, label) => {
+    const data = source || {};
+    if (data.status !== "FRESH") return `<div class="mention-block"><strong>${label}</strong><p>${escapeHtml(data.status || "UNKNOWN")} · counts unavailable, not zero.</p></div>`;
+    const headlines = (data.headlines || []).map(row => `<li><a href="${escapeHtml(row.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(row.title)}</a><span>${ageAt(row.published_at_utc)} · ${escapeHtml(row.matched_text)} matched</span></li>`).join("");
+    return `<div class="mention-block"><strong>${label}</strong><p>${Number(data.relevant_count_24h || 0)} relevant items / 24h · ${Number(data.relevant_count_7d || 0)}/7d · newest ${ageAt(data.newest_published_at_utc)} · capture ${escapeHtml(data.query_at_utc ? new Date(data.query_at_utc).toLocaleString() : "unknown")}</p>${Number(data.undated_matched_item_count || 0) ? `<p>${Number(data.undated_matched_item_count)} matching results excluded because publication time is unknown.</p>` : ""}${headlines ? `<ul>${headlines}</ul>` : "<p>No dated relevant items.</p>"}</div>`;
+  };
+  const identity = item => {
+    const contracts = item.identity?.contracts || [];
+    if (!contracts.length) return `<p class="muted">Identity: contract unavailable. No name based market links.</p>`;
+    return `<ul class="contract-list">${contracts.map(contract => `<li><strong>${escapeHtml(contract.chain)}</strong><code>${escapeHtml(contract.address)}</code><button type="button" class="copy-address" data-address="${escapeHtml(contract.address)}">Copy</button>${contract.explorer_url ? `<a href="${escapeHtml(contract.explorer_url)}" target="_blank" rel="noopener noreferrer">Explorer</a>` : ""}${contract.dex_url ? `<a href="${escapeHtml(contract.dex_url)}" target="_blank" rel="noopener noreferrer">DEX Screener</a>` : ""}</li>`).join("")}</ul>${contracts.length > 1 ? `<p class="muted">Multiple contract addresses; each chain is listed separately.</p>` : ""}`;
+  };
+  const pairDetails = (item, requestedPairs = item.dex_pairs || []) => {
+    const pairs = [...requestedPairs].sort((left, right) => Number(right.liquidity_usd != null) - Number(left.liquidity_usd != null) || Number(right.liquidity_usd || 0) - Number(left.liquidity_usd || 0));
+    if (!pairs.length) return `<p class="muted">DEX pairs unavailable; pair age and liquidity unknown.</p>`;
+    return `<div class="pair-list">${pairs.map((pair, index) => {
+      const tx24 = pair.buys_sells_by_period?.h24 || {};
+      const v24 = pair.volume_by_period?.h24;
+      const changes = pair.price_change_by_period || {};
+      const primary = pair.is_primary === true || (pair.is_primary == null && index === 0 && pair.liquidity_usd != null);
+      return `<div class="pair-row"><strong>${escapeHtml(pair.dex_id || "DEX")} ${primary ? "· Primary pair (highest known liquidity)" : ""}</strong>${pair.pair_url ? `<a href="${escapeHtml(pair.pair_url)}" target="_blank" rel="noopener noreferrer">Open pair</a>` : ""}<p>Pair age ${ageAt(pair.pair_created_at_utc)} · liquidity ${money(pair.liquidity_usd)} · FDV ${money(pair.fdv_usd)} · 24h volume ${money(v24)} · 24h buys ${tx24.buys ?? "unknown"} / sells ${tx24.sells ?? "unknown"} · 24h move ${changes.h24 == null ? "unknown" : `${changes.h24}%`} · capture ${escapeHtml(pair.captured_at_utc ? new Date(pair.captured_at_utc).toLocaleString() : "unknown")}</p></div>`;
+    }).join("")}</div>`;
+  };
+  $("#social-items").innerHTML = items.length ? items.map(item => {
+    const momentum = item.momentum || {};
+    const trending = item.trending || {};
+    const fomo = item.fomo_watch || {};
+    const observations = (fomo.observations || []).map(row => `<li>${escapeHtml(row.kind.replaceAll("_", " "))} · ${escapeHtml(row.source)} · ${escapeHtml(JSON.stringify(Object.fromEntries(Object.entries(row).filter(([key]) => !["kind", "source"].includes(key)))))}</li>`).join("");
+    const headlineTop = [item.mentions?.google_news, item.mentions?.reddit].flatMap(value => value?.headlines || []).sort((a, b) => Date.parse(b.published_at_utc) - Date.parse(a.published_at_utc)).slice(0, 3);
+    const multiContract = (item.identity?.contracts || []).length > 1;
+    const pairContent = multiContract ? `<label class="chain-picker">Choose a chain before loading address matched pairs<select class="pair-chain" data-coin-id="${escapeHtml(item.coingecko_id)}"><option value="">Choose chain</option>${item.identity.contracts.map(contract => `<option value="${escapeHtml(contract.chain)}">${escapeHtml(contract.chain)}</option>`).join("")}</select></label><div class="pair-results" data-coin-id="${escapeHtml(item.coingecko_id)}"><p class="muted">Choose a chain to show address matched pairs.</p></div>` : pairDetails(item);
+    return `<details class="hype-card"><summary><span><strong>${escapeHtml(item.name)} <small>${escapeHtml(item.symbol)}</small></strong><span>CoinGecko trending #${trending.rank ?? "?"} · ${escapeHtml(momentum.state || "INSUFFICIENT_HISTORY").replaceAll("_", " ")}</span></span><span class="summary-meta">${count(item.mentions?.google_news, "24h")} News / 24h · ${count(item.mentions?.reddit, "24h")} Reddit / 24h<br>newest ${ageAt(newestMentionAt(item))}</span></summary><div class="hype-body"><p>CoinGecko rank #${trending.rank ?? "unknown"} · previous ${trending.previous_rank ?? "unknown"} · change ${trending.change == null ? "unknown" : `${trending.change > 0 ? "+" : ""}${trending.change}`} · rolling 24h · ${escapeHtml(trending.state || "INSUFFICIENT_HISTORY").replaceAll("_", " ")}${momentum.comparison_at_utc ? ` since ${new Date(momentum.comparison_at_utc).toLocaleString()}` : " · insufficient history"}</p><div class="metrics"><div class="metric"><span>CoinGecko price</span><strong>${money(item.market?.price_usd)}</strong></div><div class="metric"><span>Market cap</span><strong>${money(item.market?.market_cap_usd)}</strong></div><div class="metric"><span>24h volume</span><strong>${money(item.market?.volume_24h_usd)}</strong></div><div class="metric"><span>Volume / market cap · 24h</span><strong>${item.market?.volume_market_cap_ratio == null ? "unknown" : `${(item.market.volume_market_cap_ratio * 100).toFixed(2)}%`} · captured ${escapeHtml(item.market?.captured_at_utc ? new Date(item.market.captured_at_utc).toLocaleString() : "unknown")}</strong></div><div class="metric"><span>CoinGecko 24h change</span><strong>${item.market?.change_24h_pct == null ? "unknown" : `${item.market.change_24h_pct}%`}</strong></div><div class="metric"><span>Volume change vs prior capture</span><strong>${momentum.volume_change_pct == null ? "insufficient history" : `${momentum.volume_change_pct.toFixed(2)}%`}</strong></div><div class="metric"><span>Matching mention changes vs prior capture · 24h / 7d</span><strong>${escapeHtml(JSON.stringify(momentum.mention_change_by_source || {}))}</strong></div></div><h3>Chain and contract</h3>${identity(item)}<h3>Recent matching headlines</h3>${headlineTop.length ? `<ul class="headlines">${headlineTop.map(row => `<li><a href="${escapeHtml(row.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(row.title)}</a><span>${ageAt(row.published_at_utc)}</span></li>`).join("")}</ul>` : `<p class="muted">No dated, relevant headline links.</p>`}<div class="mention-grid">${mention(item.mentions?.google_news, "Google News")}${mention(item.mentions?.reddit, "Reddit sitewide")}</div><h3>Address matched DEX pairs</h3>${pairContent}<h3>FOMO watch · observations only</h3><p class="muted">${escapeHtml(fomo.disclaimer || "Unknown data stays unknown; observations do not affect score or direction.")}</p>${observations ? `<ul>${observations}</ul>` : `<p class="muted">${escapeHtml(fomo.status || "UNKNOWN").replaceAll("_", " ")}; no observation recorded.</p>`}</div></details>`;
+  }).join("") : `<p class="muted">Social sources are unavailable or still refreshing.</p>`;
+  document.querySelectorAll(".copy-address").forEach(button => button.addEventListener("click", async () => { try { await navigator.clipboard.writeText(button.dataset.address); button.textContent = "Copied"; } catch { button.textContent = "Copy unavailable"; } }));
+  document.querySelectorAll(".pair-chain").forEach(select => select.addEventListener("change", () => {
+    const item = items.find(row => row.coingecko_id === select.dataset.coinId);
+    const target = document.querySelector(`.pair-results[data-coin-id="${CSS.escape(select.dataset.coinId)}"]`);
+    if (!item || !target) return;
+    const pairs = select.value ? (item.dex_pairs || []).filter(pair => pair.coingecko_platform === select.value) : [];
+    target.innerHTML = select.value ? pairDetails(item, pairs) : `<p class="muted">Choose a chain to show address matched pairs.</p>`;
+  }));
 }
 
 function renderLongTerm() {
@@ -236,7 +286,6 @@ function rebuildPriceMap(item) {
 
 function recalculateLiveRanking(targetSnapshot = snapshot) {
   if (!targetSnapshot?.candidates?.length) return;
-  const socialBySymbol = Object.fromEntries((targetSnapshot.social_context?.items || []).map(item => [String(item.symbol || "").toUpperCase(), item]));
   const clamp = value => Math.max(-1, Math.min(1, value));
   for (const item of targetSnapshot.candidates) {
     const metrics = item.metrics || {};
@@ -250,17 +299,11 @@ function recalculateLiveRanking(targetSnapshot = snapshot) {
     const spreadScore = Math.max(0, 100 - spread * 10);
     const volatilityScore = Math.max(0, 100 - Math.abs(volatility - 0.04) * 1200);
     const marketScore = directionalStrength * 0.45 + liquidityScore * 0.25 + spreadScore * 0.15 + volatilityScore * 0.15;
-    const social = socialBySymbol[String(item.symbol || "").toUpperCase()] || {};
-    const counts = social.source_counts || {};
-    const attention = Math.max(0, Math.min(100, Number(social.attention_score) || 0));
-    const socialScore = Math.min(100, attention * 0.8 + Math.min(20, (Number(counts.google_news) || 0) * 0.5 + (Number(counts.reddit) || 0)));
-    const socialDirection = social.price_change_24h_pct == null ? 0 : clamp(Number(social.price_change_24h_pct) / 5);
-    const combinedDirection = marketDirection * 0.70 + socialDirection * 0.30;
-    const score = Number((marketScore * 0.70 + socialScore * 0.30).toFixed(2));
+    const score = Number(marketScore.toFixed(2));
     item.opportunity_score = score;
     item.confidence_band = score >= 70 ? "HIGH" : score >= 45 ? "MODERATE" : "LOW";
-    item.bias = combinedDirection >= 0.25 ? "LONG_RESEARCH" : combinedDirection <= -0.25 ? "SHORT_RESEARCH" : "AVOID";
-    item.score_breakdown = {...(item.score_breakdown || {}), score, band: item.confidence_band, bias: item.bias, market_score: Number(marketScore.toFixed(2)), social_score: Number(socialScore.toFixed(2)), combined_direction: Number(combinedDirection.toFixed(4))};
+    item.bias = marketDirection >= 0.25 ? "LONG_RESEARCH" : marketDirection <= -0.25 ? "SHORT_RESEARCH" : "AVOID";
+    item.score_breakdown = {...(item.score_breakdown || {}), score, band: item.confidence_band, bias: item.bias, market_score: score, market_direction: Number(marketDirection.toFixed(4))};
     item.explanation = {...(item.explanation || {}), directional_change_24h_pct: change, quick_reason: item.bias === "LONG_RESEARCH" ? "Fresh Kraken quote passed the bullish research threshold." : item.bias === "SHORT_RESEARCH" ? "Fresh Kraken quote passed the bearish research threshold; short execution remains permission-gated." : "Fresh Kraken quote did not clear the directional research threshold."};
     rebuildPriceMap(item);
   }
@@ -289,7 +332,9 @@ async function refreshAllSnapshots() {
     else failures.push(`${modeConfig[result.mode].title}: artifact refresh failed after 3 attempts (${result.error})`);
   }
   if (!next[activeMode]) throw new Error(failures.join(" ") || "No schedule snapshot is available.");
-  const latestSocial = Object.values(next).map(item => item.social_context).filter(item => item?.captured_at_utc).sort((a, b) => Date.parse(b.captured_at_utc) - Date.parse(a.captured_at_utc))[0];
+  let latestSocial = null;
+  try { latestSocial = await fetchFreshJson("data/social-context-v2-latest.json"); }
+  catch { latestSocial = Object.values(next).map(item => item.social_context).filter(item => item?.captured_at_utc).sort((a, b) => Date.parse(b.captured_at_utc) - Date.parse(a.captured_at_utc))[0] || null; }
   if (latestSocial) Object.values(next).forEach(item => { item.social_context = cloneJson(latestSocial); item.social_context_refresh_mode = "latest available shared collector snapshot"; });
   snapshotsByMode = next;
   snapshot = snapshotsByMode[activeMode];
@@ -487,7 +532,7 @@ async function bootLegacy({manual = false} = {}) {
     $("#scan-summary").textContent += ` · Live Kraken quotes updated ${liveTime} (${liveCount}/${snapshot.candidates.length}); market artifact captured ${new Date(snapshot.generated_at_utc).toLocaleString()}; social/news artifact captured ${socialTime}.`;
     if (manual && previousTimestamp && previousTimestamp === snapshot.generated_at_utc) { $("#scan-status").textContent = `LIVE ${modeConfig[activeMode].title}`; }
   }
-  catch (error) { snapshot = null; renderDataStale(`Live market refresh failed: ${error.message}`); }
+  catch (error) { renderDataStale(`Live market refresh failed: ${error.message}`); }
   finally { button.disabled = false; button.textContent = "Quick scan"; }
 }
 async function boot({manual = false} = {}) {
@@ -521,5 +566,36 @@ $("#refresh-button").addEventListener("click", () => boot({manual: true}));
 $("#deep-scan-button").addEventListener("click", runDeepScan);
 document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => { activeMode = tab.dataset.mode; document.querySelectorAll(".tab").forEach(item => { const selected = item === tab; item.classList.toggle("active", selected); item.setAttribute("aria-selected", String(selected)); }); $("#horizon-label").textContent = modeConfig[activeMode]?.eyebrow || "LONG-TERM HORIZON"; if (snapshotsByMode[activeMode] && liveFreshness(snapshotsByMode[activeMode]).ok) { snapshot = snapshotsByMode[activeMode]; render(); } else { boot(); } }));
 document.querySelectorAll(".direction-tab").forEach(tab => tab.addEventListener("click", () => { activeDirection = tab.dataset.direction; document.querySelectorAll(".direction-tab").forEach(item => item.classList.toggle("active", item === tab)); if (snapshot) render(); }));
+document.querySelectorAll(".view-tab").forEach(tab => tab.addEventListener("click", () => {
+  document.querySelectorAll(".view-tab").forEach(item => { const active = item === tab; item.classList.toggle("active", active); item.setAttribute("aria-selected", String(active)); });
+  document.querySelectorAll(".view-pane").forEach(pane => { pane.hidden = pane.id !== tab.dataset.view; });
+}));
+$("#paper-link").addEventListener("click", () => {
+  const popup = window.open("about:blank", "_blank");
+  let address = "";
+  try {
+    address = localStorage.getItem("paperDashboardAddress") || "";
+    if (!address) {
+      address = (window.prompt("Paste the private Paper Trading dashboard address (URL only). Never paste a token or password.") || "").trim();
+      if (!address) { popup?.close(); return; }
+      let parsedAddress;
+      try { parsedAddress = new URL(address); } catch { parsedAddress = null; }
+      const credentialInAddress = parsedAddress && (parsedAddress.username || parsedAddress.password || /token|secret|password|auth|credential|session|api.?key/i.test(`${parsedAddress.search}${parsedAddress.hash}`));
+      if (!parsedAddress || !["http:", "https:"].includes(parsedAddress.protocol) || credentialInAddress) { popup?.close(); window.alert("Enter the dashboard address only, with no embedded token, password, or credential."); return; }
+      localStorage.setItem("paperDashboardAddress", address);
+    } else {
+      let parsedAddress;
+      try { parsedAddress = new URL(address); } catch { parsedAddress = null; }
+      const credentialInAddress = parsedAddress && (parsedAddress.username || parsedAddress.password || /token|secret|password|auth|credential|session|api.?key/i.test(`${parsedAddress.search}${parsedAddress.hash}`));
+      if (!parsedAddress || !["http:", "https:"].includes(parsedAddress.protocol) || credentialInAddress) { popup?.close(); window.alert("Saved dashboard address is invalid. Clear it and enter the address only."); return; }
+    }
+  } catch {
+    popup?.close();
+    window.alert("This browser could not save the dashboard address. Check device storage settings and try again.");
+    return;
+  }
+  if (popup) { popup.opener = null; popup.location.replace(address); }
+  else window.alert("Allow popups for this site, then tap Paper Trading again.");
+});
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("service-worker.js").catch(() => {});
 boot();
