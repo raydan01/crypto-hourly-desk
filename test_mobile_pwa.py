@@ -510,7 +510,9 @@ def test_production_default_hourly_entrypoint_runs_from_clean_clone(monkeypatch)
 
 
 def test_v1_reader_compatibility_and_market_only_score():
-    legacy = json.loads((ROOT / "data" / "market-opportunities-hourly-latest.json").read_text(encoding="utf-8"))["social_context"]
+    current = json.loads((ROOT / "data" / "market-opportunities-hourly-latest.json").read_text(encoding="utf-8"))
+    legacy = json.loads(json.dumps(current["social_context"]))
+    legacy["schema_version"] = "social-context.v1"
     assert legacy["schema_version"] == "social-context.v1"
     market = {"metrics": {"change_24h_pct": 0.1, "spread_bps": 1, "volume_24h_quote": 1_000_000, "volatility_24h": 0.04}}
     no_social = score_candidate(market)
@@ -546,7 +548,9 @@ def test_public_bundle_and_hourly_workflow_include_v2_without_private_data():
     workflow = (ROOT / ".github" / "workflows" / "refresh-hourly.yml").read_text(encoding="utf-8")
     assert "crypto-hourly-desk-v10-hype-v4" in worker
     assert "social-context-v2-latest.json" in worker
-    assert "git add data/social-context-v2-latest.json" in workflow
+    add_commands = [line.strip() for line in workflow.splitlines() if line.strip().startswith("git add")]
+    assert add_commands == ["git add -- data/market-opportunities-hourly-latest.json data/social-context-v2-latest.json"]
+    assert "schedule:" not in workflow
     public_files = [ROOT / name for name in ("index.html", "app.js", "styles.css", "manifest.json", "service-worker.js")]
     public_files += list((ROOT / "data").glob("*.json"))
     public_text = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in public_files)

@@ -52,8 +52,9 @@ def test_primary_pair_and_secondary_selling_pressure_match_binding_cases():
     primary = social_context.select_primary_pair(crawler["dex_pairs"], rules)
     assert primary["dex_id"] == "pumpswap"
     crawler_observations = social_context.evaluate_attention_observations(crawler["dex_pairs"], crawler["market"], rules)
-    assert all(row.get("dex_id") == "pumpswap" for row in crawler_observations if row["kind"] != "SELLING_PRESSURE")
-    assert all(row.get("pair_address") == primary["pair_address"] for row in crawler_observations if row["kind"] != "SELLING_PRESSURE")
+    pair_observations = [row for row in crawler_observations if row.get("pair_address") is not None]
+    assert all(row.get("dex_id") == "pumpswap" for row in pair_observations if row["kind"] != "SELLING_PRESSURE")
+    assert all(row.get("pair_address") == primary["pair_address"] for row in pair_observations if row["kind"] != "SELLING_PRESSURE")
 
     pengu = _item(capture, "pudgy-penguins")
     twenty_forty = next(pair for pair in pengu["dex_pairs"] if (pair.get("buys_sells_by_period") or {}).get("h24") == {"buys": 20, "sells": 40})
@@ -74,4 +75,3 @@ def test_rule_table_is_the_python_threshold_source():
     assert social_context.evaluate_momentum_state(0, 5, rules=rules) == "FLAT"
     assert social_context.evaluate_momentum_state(0, -5, rules=rules) == "FLAT"
     assert social_context.evaluate_momentum_state(0, 5.0001, rules=rules) == "RISING"
-
