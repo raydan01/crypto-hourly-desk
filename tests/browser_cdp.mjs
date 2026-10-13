@@ -1,0 +1,162 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import http from "node:http";
+import net from "node:net";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const EDGE_CANDIDATES = [
+  path.join(process.env.PROGRAMFILES || "C:\\Program Files", "Microsoft", "Edge", "Application", "msedge.exe"),
+  path.join(process.env["PROGRAMFILES(X86)"] || "C:\\Program Files (x86)", "Microsoft", "Edge", "Application", "msedge.exe"),
+  path.join(process.env.LOCALAPPDATA || "", "Microsoft", "Edge", "Application", "msedge.exe"),
+];
+const EDGE = EDGE_CANDIDATES.find(candidate => candidate && fs.existsSync(candidate));
+assert.ok(EDGE, `Microsoft Edge not found at known install paths: ${EDGE_CANDIDATES.join(", ")}`);
+assert.equal(typeof WebSocket, "function", "This script requires Node.js with the built-in WebSocket client");
+
+async function freePort() {
+  const server = net.createServer();
+  await new Promise((resolve, reject) => server.listen(0, "127.0.0.1", resolve).once("error", reject));
+  const { port } = server.address();
+  await new Promise(resolve => server.close(resolve));
+  return port;
+}
+
+function mime(file) {
+  return ({ ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".svg": "image/svg+xml" })[path.extname(file)] || "application/octet-stream";
+}
+
+const uiFixture = fs.readFileSync(path.join(ROOT, "tests", "fixtures", "social-context-v2-ui.json"));
+const server = http.createServer((request, response) => {
+  const pathname = decodeURIComponent(new URL(request.url, "http://127.0.0.1").pathname);
+  if (pathname === "/") { response.writeHead(302, { location: "/index.html" }).end(); return; }
+  if (pathname === "/data/social-context-v2-latest.json") {
+    response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+    response.end(uiFixture);
+    return;
+  }
+  const target = path.resolve(ROOT, `.${pathname}`);
+  if (target !== ROOT && !target.startsWith(ROOT + path.sep)) {
+    response.writeHead(403).end("forbidden");
+    return;
+  }
+  fs.readFile(target, (error, content) => {
+    if (error) { response.writeHead(404).end("not found"); return; }
+    response.writeHead(200, { "content-type": mime(target), "cache-control": "no-store" });
+    response.end(content);
+  });
+});
+await new Promise((resolve, reject) => server.listen(0, "127.0.0.1", resolve).once("error", reject));
+const sitePort = server.address().port;
+const debugPort = await freePort();
+const profile = fs.mkdtempSync(path.join(ROOT, ".test-tmp", "market-attention-edge-"));
+const edge = spawn(EDGE, [
+  "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-extensions", "--no-first-run", "--no-default-browser-check",
+  "--no-proxy-server", "--remote-allow-origins=*", `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
+  `http://127.0.0.1:${sitePort}/`,
+], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+let edgeStderr = "";
+edge.stderr.setEncoding("utf8").on("data", chunk => { edgeStderr += chunk; });
+let ws;
+let shutdownBrowser;
+try {
+  let version;
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${debugPort}/json/version`);
+      if (response.ok) { version = await response.json(); break; }
+    } catch {}
+    if (edge.exitCode !== null) throw new Error(`Edge exited early: ${edgeStderr}`);
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.ok(version, `Edge CDP did not start: ${edgeStderr}`);
+  const exceptions = [];
+  let nextId = 0;
+  let pageNextId = 0;
+  const innerPending = new Map();
+  let send;
+  async function connectDebugger(url) {
+    ws = new WebSocket(url);
+    await new Promise((resolve, reject) => { ws.addEventListener("open", resolve, { once: true }); ws.addEventListener("error", reject, { once: true }); });
+    const pending = new Map();
+    ws.addEventListener("message", event => {
+      const message = JSON.parse(event.data);
+      if (process.env.CDP_DEBUG === "1") console.log("CDP", JSON.stringify(message));
+      if (message.method === "Target.receivedMessageFromTarget") {
+        const inner = JSON.parse(message.params.message);
+        if (inner.method === "Runtime.exceptionThrown") exceptions.push(inner.params.exceptionDetails.text || "page exception");
+        if (inner.id && innerPending.has(inner.id)) {
+          const { resolve, reject } = innerPending.get(inner.id);
+          innerPending.delete(inner.id);
+          if (inner.error) reject(new Error(inner.error.message)); else resolve(inner.result);
+        }
+      }
+      if (message.id && pending.has(message.id)) {
+        const { resolve, reject } = pending.get(message.id);
+        pending.delete(message.id);
+        if (message.error) reject(new Error(message.error.message)); else resolve(message.result);
+      }
+    });
+    return (method, params = {}) => new Promise((resolve, reject) => {
+      const id = ++nextId;
+      const timer = setTimeout(() => { pending.delete(id); reject(new Error(`CDP timeout: ${method}`)); }, 7000);
+      pending.set(id, { resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
+      ws.send(JSON.stringify({ id, method, params }));
+    });
+  }
+  send = await connectDebugger(version.webSocketDebuggerUrl);
+  shutdownBrowser = () => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ id: 999999, method: "Browser.close" })); };
+  const { targetId } = await send("Target.createTarget", { url: `http://127.0.0.1:${sitePort}/` });
+  const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: false });
+  await send("Target.activateTarget", { targetId });
+  const pageSend = (method, params = {}) => new Promise(async (resolve, reject) => {
+    const id = ++pageNextId;
+    const timer = setTimeout(() => { innerPending.delete(id); reject(new Error(`CDP page timeout: ${method}`)); }, 7000);
+    innerPending.set(id, { resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
+    try { await send("Target.sendMessageToTarget", { sessionId, message: JSON.stringify({ id, method, params }) }); }
+    catch (error) { clearTimeout(timer); innerPending.delete(id); reject(error); }
+  });
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  await pageSend("Runtime.enable");
+  await pageSend("Network.enable");
+  await pageSend("Network.setBlockedURLs", { urls: ["https://api.kraken.com/*", "https://api.coingecko.com/*", "https://news.google.com/*", "https://www.reddit.com/*", "https://api.dexscreener.com/*"] });
+  await pageSend("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  const evaluate = async expression => {
+    const result = await pageSend("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+    if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+    return result.result.value;
+  };
+  const loaded = Date.now() + 10000;
+  let initial;
+  while (Date.now() < loaded) {
+    initial = await evaluate(`({ready: document.readyState, cards: document.querySelectorAll("#social-items .hype-card").length, status: document.querySelector("#social-status")?.textContent, width: document.documentElement.scrollWidth})`);
+    if (initial.cards > 0) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.equal(initial.cards, 1, JSON.stringify(initial));
+  assert.ok(initial.width <= 390, JSON.stringify(initial));
+  await evaluate(`document.querySelector("#social-items .hype-card").open = true`);
+  const expanded = await evaluate(`({width: document.documentElement.scrollWidth, headlines: document.querySelectorAll("#social-items .headlines a").length, pairs: document.querySelectorAll("#social-items .pair-row").length, reddit: document.querySelector("#social-items").innerText.includes("Reddit unavailable (rate-limited)"), contract: document.querySelector("#social-items .contract-list code")?.textContent})`);
+  assert.ok(expanded.width <= 390, JSON.stringify(expanded));
+  assert.equal(expanded.headlines, 1, JSON.stringify(expanded));
+  assert.equal(expanded.pairs, 2, JSON.stringify(expanded));
+  assert.equal(expanded.reddit, true, JSON.stringify(expanded));
+  assert.equal(expanded.contract, "CQCDTp8rsFV3PhaPeYjcCW5LdGTxi6jFx7eC3UXnpump");
+  await evaluate(`document.querySelector('[data-view="trading-view"]').click()`);
+  const trading = await evaluate(`({active: document.querySelector("#trading-view")?.hidden === false, width: document.documentElement.scrollWidth})`);
+  assert.equal(trading.active, true, JSON.stringify(trading));
+  assert.ok(trading.width <= 390, JSON.stringify(trading));
+  assert.deepEqual(exceptions, []);
+  console.log(JSON.stringify({ browser: "Microsoft Edge headless CDP", viewport: "390x844", initial, expanded, trading, exceptions }, null, 2));
+} finally {
+  try { shutdownBrowser?.(); } catch {}
+  try { ws?.close(); } catch {}
+  if (edge.exitCode === null) await Promise.race([new Promise(resolve => edge.once("exit", resolve)), new Promise(resolve => setTimeout(resolve, 2500))]);
+  if (edge.exitCode === null) edge.kill();
+  if (edge.exitCode === null) await new Promise(resolve => edge.once("exit", resolve));
+  await new Promise(resolve => server.close(resolve));
+  fs.rmSync(profile, { recursive: true, force: true });
+}

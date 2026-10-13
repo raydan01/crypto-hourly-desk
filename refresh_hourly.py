@@ -18,6 +18,7 @@ from research.market_scanner import scan_markets
 from social_context import build_social_context, write_social_context
 
 OUTPUT = ROOT / "data" / "market-opportunities-hourly-latest.json"
+SOCIAL_OUTPUT = ROOT / "data" / "social-context-v2-latest.json"
 WATCHLIST = ROOT / "data" / "watchlist.json"
 API = "https://api.kraken.com/0/public"
 NON_CRYPTO_SYMBOLS = {"USD", "GBP", "EUR", "CAD", "AUD", "JPY", "CHF"}
@@ -154,8 +155,13 @@ def build_snapshot(cadence: str = "hourly", social_context: dict | None = None) 
     return payload
 
 
-if __name__ == "__main__":
+def main() -> dict:
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     payload = build_snapshot()
-    write_social_context(payload["social_context"])
+    write_social_context(payload["social_context"], SOCIAL_OUTPUT)
     OUTPUT.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    return payload
+
+
+if __name__ == "__main__":
+    main()

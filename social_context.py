@@ -22,17 +22,22 @@ CG_MIN_INTERVAL = 6.0
 REDDIT_MIN_INTERVAL = 2.0
 _last_cg_call = 0.0
 _last_reddit_call = 0.0
-_CHAIN_EXPLORERS = {
-    "solana": ("https://solscan.io/account/", "solana"),
-    "ethereum": ("https://etherscan.io/address/", "ethereum"),
-    "binance-smart-chain": ("https://bscscan.com/address/", "bsc"),
-    "base": ("https://basescan.org/address/", "base"),
-    "arbitrum-one": ("https://arbiscan.io/address/", "arbitrum"),
-    "polygon-pos": ("https://polygonscan.com/address/", "polygon"),
-    "avalanche": ("https://snowtrace.io/address/", "avalanche"),
-    "optimistic-ethereum": ("https://optimistic.etherscan.io/address/", "optimism"),
-    "robinhood": ("https://robinhoodchain.blockscout.com/address/", "robinhood"),
+_CHAIN_MAP = {
+    "solana": ("solana", "https://solscan.io/account/"),
+    "ethereum": ("ethereum", "https://etherscan.io/address/"),
+    "binance-smart-chain": ("bsc", "https://bscscan.com/address/"),
+    "polygon-pos": ("polygon", "https://polygonscan.com/address/"),
+    "arbitrum-one": ("arbitrum", "https://arbiscan.io/address/"),
+    "optimistic-ethereum": ("optimism", "https://optimistic.etherscan.io/address/"),
+    "base": ("base", "https://basescan.org/address/"),
+    "robinhood": ("robinhood", "https://robinhoodchain.blockscout.com/address/"),
 }
+_last_response_headers = {}
+_reddit_stopped = False
+
+
+class RedditUnavailable(RuntimeError):
+    pass
 
 
 def _now() -> datetime:
@@ -44,11 +49,14 @@ def _iso(value: datetime) -> str:
 
 
 def _http_get(url: str, accept: str = "application/json") -> tuple[int, bytes]:
+    global _last_response_headers
     request = Request(url, headers={"Accept": accept, "User-Agent": UA})
     try:
         with urlopen(request, timeout=20) as response:
+            _last_response_headers = {key.lower(): value for key, value in response.headers.items()}
             return int(response.status), response.read()
     except HTTPError as exc:
+        _last_response_headers = {key.lower(): value for key, value in (exc.headers.items() if exc.headers else [])}
         return int(exc.code), exc.read()
 
 
@@ -67,6 +75,9 @@ def _pace(provider: str) -> None:
 
 
 def _get(url: str, accept: str, provider: str | None = None):
+    global _reddit_stopped
+    if provider == "reddit" and _reddit_stopped:
+        raise RedditUnavailable("rate-limited by Reddit")
     last_error = None
     attempts = 1 if provider == "reddit" else len(RETRY_DELAYS_SECONDS) + 1
     for attempt in range(attempts):
@@ -74,6 +85,11 @@ def _get(url: str, accept: str, provider: str | None = None):
             _pace(provider)
         try:
             status, body = _http_get(url, accept)
+            remaining = _last_response_headers.get("x-ratelimit-remaining")
+            rate_empty = remaining is not None and _number(remaining) == 0
+            if provider == "reddit" and (status == 429 or rate_empty):
+                _reddit_stopped = True
+                raise RedditUnavailable("rate-limited by Reddit")
             if status == 429:
                 raise HTTPError(url, status, "rate limited", {}, None)
             if status < 200 or status >= 300:
@@ -158,7 +174,7 @@ def _match(item: dict, name: str, symbol: str) -> str | None:
 def _mentions(source: str, name: str, symbol: str, now: datetime) -> dict:
     quoted_name = f'"{name}" when:7d'
     if source == "google_news":
-        url = "https://news.google.com/rss/search?q=" + quote_plus(quoted_name)
+        url = "https://news.google.com/rss/search?q=" + quote_plus(quoted_name) + "&hl=en-US&gl=US&ceid=US:en"
         accept = "application/rss+xml, application/atom+xml"
         provider = None
     else:
@@ -168,7 +184,9 @@ def _mentions(source: str, name: str, symbol: str, now: datetime) -> dict:
     try:
         items = _rss_items(_get(url, accept, provider))
     except Exception as exc:
-        return {"status": "DEGRADED", "query_at_utc": _iso(now), "relevant_count_24h": None, "relevant_count_7d": None, "newest_published_at_utc": None, "newest_age_seconds": None, "matched_item_count": 0, "headlines": [], "error_class": "HTTP_429" if isinstance(exc, HTTPError) and exc.code == 429 else type(exc).__name__, "query": quoted_name if source == "google_news" else f'"{name}" sitewide'}
+        limited = source == "reddit" and isinstance(exc, RedditUnavailable)
+        quota = {name: _last_response_headers[name] for name in ("x-ratelimit-used", "x-ratelimit-remaining", "x-ratelimit-reset") if name in _last_response_headers} if limited else None
+        return {"status": "UNAVAILABLE" if limited else "DEGRADED", "reason": "rate-limited by Reddit" if limited else None, "rate_limit_headers": quota, "query_at_utc": _iso(now), "relevant_count_24h": None, "relevant_count_7d": None, "newest_published_at_utc": None, "newest_age_seconds": None, "matched_item_count": 0, "headlines": [], "error_class": "HTTP_429" if limited else type(exc).__name__, "query": quoted_name if source == "google_news" else f'"{name}" sitewide'}
     matched: dict[str, dict] = {}
     undated_count = 0
     for item in items:
@@ -200,20 +218,46 @@ def _identity(coin_id: str, cached: dict | None, now: datetime) -> dict:
         platforms = detail.get("platforms") or {}
         cached.update({"cached_at_utc": _iso(now), "platforms": platforms})
     contracts = []
+    malformed_chains = []
     for chain, address in platforms.items():
         if not isinstance(chain, str) or not isinstance(address, str) or not address.strip():
             continue
-        explorer = _CHAIN_EXPLORERS.get(chain)
-        contract = {"chain": chain, "address": address.strip(), "explorer_url": explorer[0] + quote(address.strip(), safe="") if explorer else None, "dex_url": f"https://dexscreener.com/{explorer[1]}/{quote(address.strip(), safe='')}" if explorer else None}
+        address = address.strip()
+        valid = bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", address)) if chain == "solana" else bool(re.fullmatch(r"0x[0-9a-fA-F]{40}", address))
+        if not valid:
+            malformed_chains.append(chain)
+            contracts.append({"chain": chain, "address": address, "status": "MALFORMED", "dex_chain": None, "explorer_url": None, "dex_url": None, "dex_status": "MALFORMED"})
+            continue
+        mapped = _CHAIN_MAP.get(chain)
+        dex_chain = mapped[0] if mapped else None
+        explorer_base = mapped[1] if mapped else None
+        contract = {"chain": chain, "dex_chain": dex_chain, "address": address, "explorer_url": explorer_base + quote(address, safe="") if explorer_base else None, "dex_url": f"https://dexscreener.com/{dex_chain}/{quote(address, safe='')}" if dex_chain else None, "dex_status": "NOT_QUERIED" if dex_chain else "UNSUPPORTED"}
         contracts.append(contract)
-    status = "MULTIPLE" if len(contracts) > 1 else "KNOWN" if len(contracts) == 1 else "UNKNOWN"
-    return {"status": status, "contracts": contracts, "warning": "Multiple contract addresses; select a chain." if status == "MULTIPLE" else "Contract unavailable." if status == "UNKNOWN" else None}
+    valid_count = sum(contract.get("status") != "MALFORMED" for contract in contracts)
+    status = "MULTIPLE" if valid_count > 1 else "KNOWN" if valid_count == 1 else "MALFORMED" if malformed_chains else "UNKNOWN"
+    unsupported = any(contract.get("dex_status") == "UNSUPPORTED" for contract in contracts)
+    warning_parts = []
+    if malformed_chains:
+        warning_parts.append("Malformed contract address for " + ", ".join(malformed_chains) + "; links and DEX lookup disabled.")
+    if unsupported:
+        warning_parts.append("DEX lookup not supported for this chain.")
+    if not warning_parts and status == "MULTIPLE":
+        warning_parts.append("Multiple contract addresses; select a chain.")
+    if not warning_parts and status == "UNKNOWN":
+        warning_parts.append("Contract unavailable.")
+    warning = " ".join(warning_parts) or None
+    return {"status": status, "contracts": contracts, "warning": warning}
 
 
 def _dex(contract: dict, now: datetime) -> list[dict]:
     if not contract:
         return []
-    chain = contract["chain"]
+    if contract.get("status") == "MALFORMED":
+        return []
+    chain = contract.get("dex_chain")
+    if not chain:
+        contract["dex_status"] = "UNSUPPORTED"
+        return []
     address = contract["address"]
     url = f"https://api.dexscreener.com/token-pairs/v1/{quote(chain, safe='')}/{quote(address, safe='')}"
     try:
@@ -221,8 +265,11 @@ def _dex(contract: dict, now: datetime) -> list[dict]:
         rows = json.loads(body.decode("utf-8"))
         if not isinstance(rows, list):
             raise ValueError("invalid pair response")
-    except Exception:
+    except Exception as exc:
+        contract["dex_status"] = "FAILED"
+        contract["dex_error_class"] = type(exc).__name__
         return []
+    contract["dex_status"] = "FRESH"
     pairs = []
     for row in rows:
         if not isinstance(row, dict):
@@ -242,7 +289,7 @@ def _dex(contract: dict, now: datetime) -> list[dict]:
         parsed_pair_url = urlsplit(pair_url or "")
         if parsed_pair_url.scheme != "https" or parsed_pair_url.hostname != "dexscreener.com":
             pair_url = None
-        pairs.append({"chain": str(row.get("chainId") or chain), "coingecko_platform": chain, "token_address": address, "pair_address": row.get("pairAddress"), "pair_url": pair_url, "pair_created_at_utc": _iso(created) if created else None, "age_seconds": max(0, int((now - created).total_seconds())) if created else None, "liquidity_usd": liquidity_usd, "fdv_usd": row.get("fdv"), "market_cap_usd": row.get("marketCap"), "volume_by_period": volume_by_period, "buys_sells_by_period": tx, "price_change_by_period": price_change, "dex_id": row.get("dexId"), "captured_at_utc": _iso(now)})
+        pairs.append({"chain": str(row.get("chainId") or chain), "coingecko_platform": contract["chain"], "token_address": address, "pair_address": row.get("pairAddress"), "pair_url": pair_url, "pair_created_at_utc": _iso(created) if created else None, "age_seconds": max(0, int((now - created).total_seconds())) if created else None, "liquidity_usd": liquidity_usd, "fdv_usd": row.get("fdv"), "market_cap_usd": row.get("marketCap"), "volume_by_period": volume_by_period, "buys_sells_by_period": tx, "price_change_by_period": price_change, "dex_id": row.get("dexId"), "captured_at_utc": _iso(now)})
     return sorted(pairs, key=lambda pair: (pair["liquidity_usd"] is not None, float(pair["liquidity_usd"] or 0)), reverse=True)
 
 
@@ -262,6 +309,8 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
     """Production-default collector. Previous v2 state is read from the published artifact."""
     captured_at = now or _now()
     previous = previous if previous is not None else _old_capture()
+    global _reddit_stopped
+    _reddit_stopped = False
     health = {}
     identity_cache = (previous or {}).get("identity_cache") or {}
     try:
@@ -297,8 +346,8 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
             news = _mentions("google_news", name, symbol, captured_at)
             reddit = _mentions("reddit", name, symbol, captured_at)
         else:
-            news = old.get("mentions", {}).get("google_news") or {"status": "NOT_QUERIED", "query_at_utc": None, "relevant_count_24h": None, "relevant_count_7d": None, "newest_published_at_utc": None, "newest_age_seconds": None, "matched_item_count": 0, "headlines": []}
-            reddit = old.get("mentions", {}).get("reddit") or {"status": "NOT_QUERIED", "query_at_utc": None, "relevant_count_24h": None, "relevant_count_7d": None, "newest_published_at_utc": None, "newest_age_seconds": None, "matched_item_count": 0, "headlines": []}
+            news = {"status": "NOT_QUERIED", "query_at_utc": None, "relevant_count_24h": None, "relevant_count_7d": None, "newest_published_at_utc": None, "newest_age_seconds": None, "matched_item_count": 0, "headlines": []}
+            reddit = dict(news)
         contracts = identity.get("contracts") or []
         dex_pairs = []
         for contract in contracts:
@@ -313,11 +362,13 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
         mention_changes = {}
         for source, current in (("google_news", news), ("reddit", reddit)):
             prior = (old.get("mentions", {}).get(source) or {})
-            mention_changes[source] = {window: (current.get(f"relevant_count_{window}") - prior.get(f"relevant_count_{window}")) if isinstance(current.get(f"relevant_count_{window}"), int) and isinstance(prior.get(f"relevant_count_{window}"), int) else None for window in ("24h", "7d")}
-        comparison = previous.get("captured_at_utc") if previous else None
+            mention_changes[source] = {window: (current.get(f"relevant_count_{window}") - prior.get(f"relevant_count_{window}")) if current.get("status") == "FRESH" and prior.get("status") == "FRESH" and isinstance(current.get(f"relevant_count_{window}"), int) and isinstance(prior.get(f"relevant_count_{window}"), int) else None for window in ("24h", "7d")}
+        prior_time = _timestamp(previous.get("captured_at_utc")) if previous else None
+        comparable = bool(prior_time and prior_time < captured_at and old and isinstance(old.get("trending", {}).get("rank"), int) and isinstance(old_volume, (int, float)) and old_volume > 0 and isinstance(volume, (int, float)))
+        comparison = _iso(prior_time) if comparable else None
         if not old:
             state = "NEW_SINCE_PRIOR_CAPTURE" if previous else "INSUFFICIENT_HISTORY"
-        elif rank_change is None or volume_change is None or not comparison:
+        elif not comparable or rank_change is None or volume_change is None:
             state = "INSUFFICIENT_HISTORY"
         else:
             delta_mentions = sum(value for pair in mention_changes.values() for value in pair.values() if value is not None)
@@ -341,8 +392,13 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
         failed = sum(value["status"] != "FRESH" for value in vals)
         status = "FAILED" if vals and failed == len(vals) else "DEGRADED" if failed else "FRESH" if vals else "NOT_QUERIED"
         health[source] = {"status": status, "captured_at_utc": _iso(captured_at), "age_seconds": 0, "queried_count": len(vals), "response_count": len(vals) - failed, "error_class": "SOURCE_FAILURE" if failed else None, "coverage_pct": (len(vals) - failed) / len(vals) * 100 if vals else None}
-    health["coingecko_identity"] = {"status": "FRESH" if identity_cache else "NOT_QUERIED", "captured_at_utc": _iso(captured_at), "age_seconds": 0, "queried_count": min(enriched, len(trending)), "response_count": sum(bool((item.get("identity") or {}).get("contracts")) for item in items), "error_class": None, "coverage_pct": None}
-    health["dex_screener"] = {"status": "FRESH" if any(item["dex_pairs"] for item in items) else "DEGRADED", "captured_at_utc": _iso(captured_at), "age_seconds": 0, "queried_count": sum(bool(item["identity"].get("contracts")) for item in items), "response_count": sum(bool(item["dex_pairs"]) for item in items), "error_class": None, "coverage_pct": None}
+    identity_errors = sum(bool(item["identity"].get("error_class")) for item in items)
+    identity_queried = min(enriched, len(items))
+    health["coingecko_identity"] = {"status": "DEGRADED" if identity_errors else "FRESH" if identity_queried else "NOT_QUERIED", "captured_at_utc": _iso(captured_at), "age_seconds": 0, "queried_count": identity_queried, "response_count": sum(bool((item.get("identity") or {}).get("contracts")) for item in items), "error_class": "identity_fetch_failed" if identity_errors else None, "coverage_pct": 100.0 * (identity_queried - identity_errors) / identity_queried if identity_queried else None}
+    dex_contracts = [contract for item in items for contract in (item.get("identity") or {}).get("contracts", []) if contract.get("dex_chain")]
+    dex_failed = sum(contract.get("dex_status") == "FAILED" for contract in dex_contracts)
+    dex_success = sum(contract.get("dex_status") == "FRESH" for contract in dex_contracts)
+    health["dex_screener"] = {"status": "DEGRADED" if dex_failed else "FRESH" if dex_success else "NOT_QUERIED", "captured_at_utc": _iso(captured_at), "age_seconds": 0, "queried_count": len(dex_contracts), "response_count": dex_success, "error_class": "dex_lookup_failed" if dex_failed else None, "coverage_pct": 100.0 * dex_success / len(dex_contracts) if dex_contracts else None}
     statuses = [value["status"] for value in health.values()]
     result = {"schema_version": "social-context.v2", "status": "NO_DATA" if not items else "DEGRADED" if any(status in {"FAILED", "DEGRADED"} for status in statuses) else "READY", "captured_at_utc": _iso(captured_at), "previous_capture_at_utc": previous.get("captured_at_utc") if previous else None, "research_only": True, "trade_authorization": False, "execution_allowed": False, "source_health": health, "items": items, "identity_cache": identity_cache, "attribution": "Trending and token identity data provided by CoinGecko."}
     if not validate_social_context(result):

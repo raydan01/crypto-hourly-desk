@@ -157,18 +157,18 @@ function renderSocial(social) {
   const money = value => value == null ? "unknown" : `$${Number(value).toLocaleString(undefined, {maximumSignificantDigits: 8})}`;
   const mention = (source, label) => {
     const data = source || {};
-    if (data.status !== "FRESH") return `<div class="mention-block"><strong>${label}</strong><p>${escapeHtml(data.status || "UNKNOWN")} · counts unavailable, not zero.</p></div>`;
+    if (data.status !== "FRESH") { const unavailable = data.status === "UNAVAILABLE" && data.reason === "rate-limited by Reddit" ? "Reddit unavailable (rate-limited)" : `${escapeHtml(data.status || "UNKNOWN")}: counts unavailable, not zero.`; return `<div class="mention-block"><strong>${label}</strong><p>${unavailable}</p></div>`; }
     const headlines = (data.headlines || []).map(row => `<li><a href="${escapeHtml(row.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(row.title)}</a><span>${ageAt(row.published_at_utc)} · ${escapeHtml(row.matched_text)} matched</span></li>`).join("");
     return `<div class="mention-block"><strong>${label}</strong><p>${Number(data.relevant_count_24h || 0)} relevant items / 24h · ${Number(data.relevant_count_7d || 0)}/7d · newest ${ageAt(data.newest_published_at_utc)} · capture ${escapeHtml(data.query_at_utc ? new Date(data.query_at_utc).toLocaleString() : "unknown")}</p>${Number(data.undated_matched_item_count || 0) ? `<p>${Number(data.undated_matched_item_count)} matching results excluded because publication time is unknown.</p>` : ""}${headlines ? `<ul>${headlines}</ul>` : "<p>No dated relevant items.</p>"}</div>`;
   };
   const identity = item => {
     const contracts = item.identity?.contracts || [];
-    if (!contracts.length) return `<p class="muted">Identity: contract unavailable. No name based market links.</p>`;
-    return `<ul class="contract-list">${contracts.map(contract => `<li><strong>${escapeHtml(contract.chain)}</strong><code>${escapeHtml(contract.address)}</code><button type="button" class="copy-address" data-address="${escapeHtml(contract.address)}">Copy</button>${contract.explorer_url ? `<a href="${escapeHtml(contract.explorer_url)}" target="_blank" rel="noopener noreferrer">Explorer</a>` : ""}${contract.dex_url ? `<a href="${escapeHtml(contract.dex_url)}" target="_blank" rel="noopener noreferrer">DEX Screener</a>` : ""}</li>`).join("")}</ul>${contracts.length > 1 ? `<p class="muted">Multiple contract addresses; each chain is listed separately.</p>` : ""}`;
+    if (!contracts.length) return `<p class="muted">Identity: ${escapeHtml(item.identity?.status === "MALFORMED" ? "MALFORMED: " : "")}${escapeHtml(item.identity?.warning || "contract unavailable")}. No name based market links.</p>`;
+    return `<ul class="contract-list">${contracts.map(contract => `<li><strong>${escapeHtml(contract.chain)}${contract.status === "MALFORMED" ? " MALFORMED" : ""}</strong><code>${escapeHtml(contract.address)}</code><button type="button" class="copy-address" data-address="${escapeHtml(contract.address)}">Copy</button>${contract.explorer_url ? `<a href="${escapeHtml(contract.explorer_url)}" target="_blank" rel="noopener noreferrer">Explorer</a>` : ""}${contract.dex_url ? `<a href="${escapeHtml(contract.dex_url)}" target="_blank" rel="noopener noreferrer">DEX Screener</a>` : ""}</li>`).join("")}</ul>${item.identity?.warning ? `<p class="muted">${escapeHtml(item.identity.warning)}</p>` : ""}${contracts.length > 1 ? `<p class="muted">Multiple contract addresses; each chain is listed separately.</p>` : ""}`;
   };
   const pairDetails = (item, requestedPairs = item.dex_pairs || []) => {
     const pairs = [...requestedPairs].sort((left, right) => Number(right.liquidity_usd != null) - Number(left.liquidity_usd != null) || Number(right.liquidity_usd || 0) - Number(left.liquidity_usd || 0));
-    if (!pairs.length) return `<p class="muted">DEX pairs unavailable; pair age and liquidity unknown.</p>`;
+    if (!pairs.length) { const unsupported = (item.identity?.contracts || []).some(contract => contract.dex_status === "UNSUPPORTED"); return `<p class="muted">${unsupported ? "DEX lookup not supported for this chain." : "DEX pairs unavailable; pair age and liquidity unknown."}</p>`; }
     return `<div class="pair-list">${pairs.map((pair, index) => {
       const tx24 = pair.buys_sells_by_period?.h24 || {};
       const v24 = pair.volume_by_period?.h24;
