@@ -53,12 +53,21 @@ pudgy.identity.contracts = [
 ];
 uiFixtureData.items.push(pudgy);
 const uiFixture = Buffer.from(JSON.stringify(uiFixtureData));
+let successfulTradingArtifactLoads = 0;
+let failedHourlyArtifactRequests = 0;
 const server = http.createServer((request, response) => {
   const pathname = decodeURIComponent(new URL(request.url, "http://127.0.0.1").pathname);
+  const scenario = new URL(request.headers.referer || "http://127.0.0.1/").searchParams.get("testScenario");
   if (pathname === "/") { response.writeHead(302, { location: "/index.html" }).end(); return; }
   if (pathname === "/data/social-context-v2-latest.json") {
+    if (scenario === "hype-missing") { response.writeHead(404).end("missing Hype fixture"); return; }
     response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
     response.end(uiFixture);
+    return;
+  }
+  if (scenario === "trading-failure" && pathname === "/data/market-opportunities-hourly-latest.json") {
+    failedHourlyArtifactRequests += 1;
+    response.writeHead(404).end("missing hourly fixture");
     return;
   }
   const target = path.resolve(ROOT, `.${pathname}`);
@@ -68,6 +77,7 @@ const server = http.createServer((request, response) => {
   }
   fs.readFile(target, (error, content) => {
     if (error) { response.writeHead(404).end("not found"); return; }
+    if (pathname.startsWith("/data/market-opportunities-")) successfulTradingArtifactLoads += 1;
     response.writeHead(200, { "content-type": mime(target), "cache-control": "no-store" });
     response.end(content);
   });
@@ -79,7 +89,7 @@ const profile = fs.mkdtempSync(path.join(ROOT, ".test-tmp", "market-attention-ed
 const edge = spawn(EDGE, [
   "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-extensions", "--no-first-run", "--no-default-browser-check",
   "--no-proxy-server", "--remote-allow-origins=*", `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
-  `http://127.0.0.1:${sitePort}/`,
+  `http://127.0.0.1:${sitePort}/index.html?testScenario=trading-failure`,
 ], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
 let edgeStderr = "";
 edge.stderr.setEncoding("utf8").on("data", chunk => { edgeStderr += chunk; });
@@ -161,6 +171,11 @@ try {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   assert.equal(initial.cards, 6, JSON.stringify(initial));
+  assert.ok(failedHourlyArtifactRequests > 0, `Hourly Trading artifact failure was not simulated: ${failedHourlyArtifactRequests}`);
+  assert.notEqual(initial.status, "STALE DATA", JSON.stringify(initial));
+  const tradingFailureState = await evaluate(`({status: document.querySelector("#scan-status")?.textContent, message: document.querySelector("#social-summary")?.textContent})`);
+  assert.equal(tradingFailureState.status, "DATA STALE", JSON.stringify(tradingFailureState));
+  assert.ok(!tradingFailureState.message.includes("STALE"), JSON.stringify(tradingFailureState));
   assert.ok(initial.width <= 390, JSON.stringify(initial));
   await evaluate(`document.querySelector("#social-items .hype-card").open = true`);
   const expanded = await evaluate(`({width: document.documentElement.scrollWidth, headlines: document.querySelectorAll("#social-items .hype-card:first-child .headlines a").length, pairs: document.querySelectorAll("#social-items .pair-row").length, reddit: document.querySelector("#social-items").innerText.includes("Reddit unavailable (rate-limited)"), contract: document.querySelector("#social-items .contract-list code")?.textContent})`);
@@ -191,8 +206,22 @@ try {
   const trading = await evaluate(`({active: document.querySelector("#trading-view")?.hidden === false, width: document.documentElement.scrollWidth})`);
   assert.equal(trading.active, true, JSON.stringify(trading));
   assert.ok(trading.width <= 390, JSON.stringify(trading));
+  await pageSend("Page.navigate", { url: `http://127.0.0.1:${sitePort}/index.html?testScenario=hype-missing` });
+  const reverseDeadline = Date.now() + 10000;
+  let reverse;
+  while (Date.now() < reverseDeadline) {
+    reverse = await evaluate(`({hype: document.querySelector("#social-status")?.textContent, message: document.querySelector("#social-items")?.innerText, tradingStatus: document.querySelector("#scan-status")?.textContent})`);
+    if (reverse.hype === "HYPE DATA UNAVAILABLE") break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.equal(reverse.hype, "HYPE DATA UNAVAILABLE", JSON.stringify(reverse));
+  assert.ok(reverse.message.includes("Hype data unavailable"), JSON.stringify(reverse));
+  await evaluate(`document.querySelector('[data-view="trading-view"]').click()`);
+  const reverseTrading = await evaluate(`({active: document.querySelector("#trading-view")?.hidden === false, status: document.querySelector("#scan-status")?.textContent})`);
+  assert.equal(reverseTrading.active, true, JSON.stringify(reverseTrading));
+  assert.ok(successfulTradingArtifactLoads > 0, `Trading artifacts were not served successfully: ${successfulTradingArtifactLoads}`);
   assert.deepEqual(exceptions, []);
-  console.log(JSON.stringify({ browser: "Microsoft Edge headless CDP", viewport: "390x844", initial, expanded, dexStatusChecks, trading, exceptions }, null, 2));
+  console.log(JSON.stringify({ browser: "Microsoft Edge headless CDP", viewport: "390x844", initial, failedHourlyArtifactRequests, tradingFailureState, expanded, dexStatusChecks, trading, reverse, reverseTrading, successfulTradingArtifactLoads, exceptions }, null, 2));
 } finally {
   try { shutdownBrowser?.(); } catch {}
   try { ws?.close(); } catch {}

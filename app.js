@@ -6,6 +6,7 @@ const MAX_LIVE_QUOTE_AGE_SECONDS = 120;
 const MAX_HYPE_AGE_SECONDS = 7200;
 let snapshot = null;
 let snapshotsByMode = {};
+let hypeSnapshot = null;
 let refreshFailures = [];
 let activeMode = "hourly";
 let activeDirection = "all";
@@ -27,7 +28,7 @@ function utcAgeSeconds(value) {
 }
 
 function renderDataStale(reason) {
-  renderSocial(snapshot?.social_context || {});
+  renderSocial(hypeSnapshot);
   $("#scan-status").textContent = "DATA STALE";
   $("#scan-summary").textContent = `${reason} Build ${APP_BUILD_ID}. No setup or price map is actionable until a complete live refresh succeeds.`;
   $("#opportunities").innerHTML = `<div class="panel"><strong>DATA STALE — NO SIGNAL</strong><p class="muted">${escapeHtml(reason)}</p><p class="muted">Required: ${MAX_LIVE_QUOTE_AGE_SECONDS}-second maximum quote age, complete candidate coverage, and compatible fresh range data.</p></div>`;
@@ -116,7 +117,7 @@ function orderDisplayChoices(items) {
 }
 
 function render() {
-  renderSocial(snapshot?.social_context || {});
+  renderSocial(hypeSnapshot);
   const freshness = liveFreshness();
   if (!freshness.ok) {
     renderDataStale(freshness.reason);
@@ -139,6 +140,13 @@ function render() {
 }
 
 function renderSocial(social) {
+  if (!social) {
+    $("#social-status").textContent = "HYPE DATA UNAVAILABLE";
+    $("#social-summary").textContent = "Hype data unavailable. The Hype artifact could not be loaded.";
+    $("#social-health").innerHTML = "";
+    $("#social-items").innerHTML = `<p class="muted">Hype data unavailable</p>`;
+    return;
+  }
   const items = (social.items || []).slice(0, 20);
   const health = social.source_health || {};
   const degraded = Object.values(health).some(value => ["DEGRADED", "FAILED"].includes(String(value.status).toUpperCase()));
@@ -314,18 +322,16 @@ function recalculateLiveRanking(targetSnapshot = snapshot) {
   targetSnapshot.avoids = targetSnapshot.candidates.filter(item => item.bias === "AVOID");
 }
 
-function cloneJson(value) {
-  return value == null ? value : JSON.parse(JSON.stringify(value));
-}
-
 async function refreshAllSnapshots() {
-  const results = await Promise.all(Object.entries(modeConfig).map(async ([mode, config]) => {
+  const [results, hypeResult] = await Promise.all([Promise.all(Object.entries(modeConfig).map(async ([mode, config]) => {
     try {
       return {mode, snapshot: await fetchFreshJson(config.file)};
     } catch (error) {
       return {mode, error: error.message || String(error)};
     }
-  }));
+  })), fetchFreshJson("data/social-context-v2-latest.json").then(snapshot => ({snapshot})).catch(error => ({error: error.message || String(error)}))]);
+  hypeSnapshot = hypeResult.snapshot || null;
+  renderSocial(hypeSnapshot);
   const next = {...snapshotsByMode};
   const failures = [];
   for (const result of results) {
@@ -333,10 +339,6 @@ async function refreshAllSnapshots() {
     else failures.push(`${modeConfig[result.mode].title}: artifact refresh failed after 3 attempts (${result.error})`);
   }
   if (!next[activeMode]) throw new Error(failures.join(" ") || "No schedule snapshot is available.");
-  let latestSocial = null;
-  try { latestSocial = await fetchFreshJson("data/social-context-v2-latest.json"); }
-  catch { latestSocial = Object.values(next).map(item => item.social_context).filter(item => item?.captured_at_utc).sort((a, b) => Date.parse(b.captured_at_utc) - Date.parse(a.captured_at_utc))[0] || null; }
-  if (latestSocial) Object.values(next).forEach(item => { item.social_context = cloneJson(latestSocial); item.social_context_refresh_mode = "latest available shared collector snapshot"; });
   snapshotsByMode = next;
   snapshot = snapshotsByMode[activeMode];
   refreshFailures = failures;
