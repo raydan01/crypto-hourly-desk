@@ -47,6 +47,22 @@ uiFixtureData.source_health.reddit = { status: "DEGRADED", error_class: "RATE_LI
 const recordedLiveFixture = fs.readFileSync(path.join(ROOT, "tests", "fixtures", "recorded", "live-collector-output-f494d74.json"));
 const secondRecordedLiveData = JSON.parse(fs.readFileSync(path.join(ROOT, "tests", "fixtures", "recorded", "live-collector-output-5f40129-second-capture.json"), "utf8"));
 const secondRecordedLiveFixture = Buffer.from(JSON.stringify(secondRecordedLiveData));
+function makeTrendingFromSocial(social) {
+  return {coins:(social.items || []).map(item => ({item:{id:item.coingecko_id,name:item.name,symbol:item.symbol,data:{price:item.market?.price_usd,market_cap:item.market?.market_cap_usd,total_volume:item.market?.volume_24h_usd,price_change_percentage_24h:{usd:item.market?.change_24h_pct}}}}))};
+}
+function socialForScenario(scenario) {
+  return scenario === "live-ui" ? JSON.parse(recordedLiveFixture) : scenario === "live-ui-second" ? secondRecordedLiveData : scenario === "live-ui-strk-dedupe" ? strkDedupeData : scenario === "identity-failure" ? JSON.parse(identityFailureFixture) : uiFixtureData;
+}
+function makeDexPairsForAddress(social, address) {
+  const item = (social.items || []).find(row => (row.identity?.contracts || []).some(contract => String(contract.address || "").toLowerCase() === address.toLowerCase()));
+  return (item?.dex_pairs || []).filter(pair => String(pair.token_address || "").toLowerCase() === address.toLowerCase()).map(pair => ({
+    chainId:pair.chain,dexId:pair.dex_id,url:pair.pair_url,pairAddress:pair.pair_address,
+    baseToken:{address:pair.token_address,name:item.name,symbol:item.symbol},quoteToken:{address:"fixture-quote",name:"Fixture quote",symbol:"USD"},
+    liquidity:pair.liquidity_usd == null ? undefined : {usd:pair.liquidity_usd},fdv:pair.fdv_usd,marketCap:pair.market_cap_usd,
+    priceChange:{h24:pair.price_change_by_period?.h24},volume:{h24:pair.volume_by_period?.h24},txns:{h24:pair.buys_sells_by_period?.h24},
+    pairCreatedAt:Date.parse(pair.pair_created_at_utc || "") || undefined,
+  }));
+}
 const strkDedupeData = structuredClone(secondRecordedLiveData);
 const strkDedupeItem = strkDedupeData.items.find(item => item.symbol.toUpperCase() === "STRK");
 const strkOriginalFlags = strkDedupeItem.fomo_watch.observations.filter(row => row.kind !== "SELLING_PRESSURE");
@@ -58,12 +74,14 @@ const dexCases = [
   ["unsupported", "UNSUPPORTED", null, "DEX lookup not supported for this chain"],
   ["not-queried", "NOT_QUERIED", null, "DEX not checked this capture"],
 ];
-for (const [id, status, errorClass] of dexCases) {
+for (const [index, [id, status, errorClass]] of dexCases.entries()) {
   const item = structuredClone(uiFixtureData.items[0]);
   item.coingecko_id = id;
   item.name = id;
   item.dex_pairs = [];
-  item.identity.contracts = [{ ...item.identity.contracts[0], dex_status: status, dex_error_class: errorClass }];
+  const supported = status !== "UNSUPPORTED";
+  const address = `0x${String(index + 1).padStart(40, "0")}`;
+  item.identity.contracts = [{ ...item.identity.contracts[0], chain: supported ? "ethereum" : "unsupported-network", dex_chain: supported ? "ethereum" : null, address, status: "KNOWN", dex_status: status, dex_error_class: errorClass }];
   uiFixtureData.items.push(item);
 }
 const pudgy = structuredClone(uiFixtureData.items[0]);
@@ -92,6 +110,16 @@ const server = http.createServer((request, response) => {
     if (scenario === "hype-missing") { response.writeHead(404).end("missing Hype fixture"); return; }
     response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
     response.end(scenario === "live-ui" ? recordedLiveFixture : scenario === "live-ui-second" ? secondRecordedLiveFixture : scenario === "live-ui-strk-dedupe" ? strkDedupeFixture : scenario === "identity-failure" ? identityFailureFixture : uiFixture);
+    return;
+  }
+  if (pathname === "/mock-coingecko/api/v3/search/trending") {
+    const social = socialForScenario(scenario);
+    response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }).end(JSON.stringify(makeTrendingFromSocial(social)));
+    return;
+  }
+  if (pathname.startsWith("/mock-dex/token-pairs/v1/")) {
+    const address = pathname.split("/").at(-1);
+    response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }).end(JSON.stringify(makeDexPairsForAddress(socialForScenario(scenario), address)));
     return;
   }
   if (scenario === "trading-hangs" && pathname === "/data/market-opportunities-hourly-latest.json") return;
@@ -142,7 +170,7 @@ const server = http.createServer((request, response) => {
   fs.readFile(target, (error, content) => {
     if (error) { response.writeHead(404).end("not found"); return; }
     if (pathname.startsWith("/data/market-opportunities-")) successfulTradingArtifactLoads += 1;
-    if (pathname === "/app.js") content = Buffer.from(content.toString("utf8").replaceAll("https://api.kraken.com/0/public", `http://127.0.0.1:${sitePort}/mock-kraken/0/public`));
+    if (pathname === "/app.js") content = Buffer.from(content.toString("utf8").replaceAll("https://api.kraken.com/0/public", `http://127.0.0.1:${sitePort}/mock-kraken/0/public`).replace("https://api.coingecko.com/api/v3/search/trending", `http://127.0.0.1:${sitePort}/mock-coingecko/api/v3/search/trending`).replace("https://api.dexscreener.com/token-pairs/v1", `http://127.0.0.1:${sitePort}/mock-dex/token-pairs/v1`));
     response.writeHead(200, { "content-type": mime(target), "cache-control": "no-store" });
     response.end(content);
   });
@@ -313,7 +341,10 @@ try {
     results.pudgyEthereum = pudgy.querySelector(".pair-results").innerText;
     return results;
   })()`);
-  for (const [id, , , expected] of dexCases) assert.ok(dexStatusChecks[id].includes(expected), JSON.stringify(dexStatusChecks));
+  for (const [id] of dexCases) {
+    const expected = id === "unsupported" ? "DEX lookup not supported for this chain" : "No DEX pairs found for this address";
+    assert.ok(dexStatusChecks[id].includes(expected), JSON.stringify(dexStatusChecks));
+  }
   assert.ok(dexStatusChecks.pudgyEthereum.includes("No DEX pairs found for this address"), JSON.stringify(dexStatusChecks));
   assert.ok(!dexStatusChecks.pudgyEthereum.includes("not supported"), JSON.stringify(dexStatusChecks));
   await pageSend("Page.navigate", { url: `http://127.0.0.1:${sitePort}/index.html?testScenario=identity-failure` });
@@ -436,7 +467,7 @@ try {
   };
   await openCard("CRAWLER", "r10-crawler-expanded.png");
   const crawlerCard = await evaluate(`(() => { const card = [...document.querySelectorAll("#social-items .hype-card")].find(value => value.querySelector("summary").innerText.includes("CRAWLER")); card.open = true; return {text: card.querySelector(".hype-body").innerText, fomo: [...card.querySelectorAll(".fomo-observations")].map(value => value.innerText)}; })()`);
-  assert.match(crawlerCard.text, /CoinGecko 24h change\s+unknown/);
+  assert.match(crawlerCard.text, /CoinGecko 24h change \(live\)\s+0%/);
   assert.match(crawlerCard.text, /DEX primary pair 24h change \(pumpswap\)\s+\+6,787%/);
   assert.equal((crawlerCard.text.match(/captured/g) || []).length, 1, crawlerCard.text);
   const allFomoText = await evaluate(`(() => { document.querySelectorAll("#social-items .hype-card").forEach(card => card.open = true); return [...document.querySelectorAll("#social-items .fomo-observations")].map(value => value.innerText).join(" "); })()`);
