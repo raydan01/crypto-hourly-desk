@@ -433,7 +433,7 @@ def test_site_contains_hype_navigation_private_link_and_market_only_wording():
     assert 'when:7d' in (ROOT / "social_context.py").read_text(encoding="utf-8")
     assert 'https://www.reddit.com/search.rss?q=' in (ROOT / "social_context.py").read_text(encoding="utf-8")
     assert 'UA = "crypto-hourly-desk/1.1"' in (ROOT / "social_context.py").read_text(encoding="utf-8")
-    assert "CG_MIN_INTERVAL = 6.0" in (ROOT / "social_context.py").read_text(encoding="utf-8")
+    assert "CG_MIN_INTERVAL = 15.0" in (ROOT / "social_context.py").read_text(encoding="utf-8")
     assert "REDDIT_MIN_INTERVAL = 2.0" in (ROOT / "social_context.py").read_text(encoding="utf-8")
 
 

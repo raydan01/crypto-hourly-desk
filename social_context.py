@@ -18,7 +18,7 @@ V2_PATH = ROOT / "data" / "social-context-v2-latest.json"
 RETRY_DELAYS_SECONDS = (2, 5)
 MAX_TRENDING = 20
 MAX_ENRICHED = 10
-CG_MIN_INTERVAL = 6.0
+CG_MIN_INTERVAL = 15.0
 REDDIT_MIN_INTERVAL = 2.0
 _last_cg_call = 0.0
 _last_reddit_call = 0.0
@@ -34,6 +34,8 @@ _CHAIN_MAP = {
 }
 _last_response_headers = {}
 _reddit_stopped = False
+_cg_identity_stopped = False
+_cg_identity_deadline = None
 
 
 class RedditUnavailable(RuntimeError):
@@ -62,7 +64,7 @@ def _http_get(url: str, accept: str = "application/json") -> tuple[int, bytes]:
 
 def _pace(provider: str) -> None:
     global _last_cg_call, _last_reddit_call
-    if provider == "coingecko":
+    if provider in {"coingecko", "coingecko_identity"}:
         delay = CG_MIN_INTERVAL - (time.monotonic() - _last_cg_call)
         if _last_cg_call and delay > 0:
             time.sleep(delay)
@@ -79,7 +81,7 @@ def _get(url: str, accept: str, provider: str | None = None):
     if provider == "reddit" and _reddit_stopped:
         raise RedditUnavailable("rate-limited by Reddit")
     last_error = None
-    attempts = 1 if provider == "reddit" else len(RETRY_DELAYS_SECONDS) + 1
+    attempts = 1 if provider in {"reddit", "coingecko_identity"} else len(RETRY_DELAYS_SECONDS) + 1
     for attempt in range(attempts):
         if provider:
             _pace(provider)
@@ -163,16 +165,25 @@ def _contains(text: str, phrase: str) -> bool:
 
 def _match(item: dict, name: str, symbol: str) -> str | None:
     title = item["title"]
-    body = item.get("body") or ""
     symbol_pattern = r"(?<![\w])\$" + re.escape(symbol) + r"(?![\w])" if symbol else None
-    for where, text in (("title", title), ("body", body)):
-        if _contains(text, name) or (symbol_pattern and re.search(symbol_pattern, text, re.IGNORECASE)):
-            return where
-    return None
+    name_match = _contains(title, name)
+    dollar_symbol_match = bool(symbol_pattern and re.search(symbol_pattern, title))
+    if not name_match and not dollar_symbol_match:
+        return None
+    # "Bunker mode" is also generic security language; the recorded Ethereum
+    # headlines describe preparation, not the trending token.
+    if name.casefold() == "bunker mode" and _contains(title, "prepare for bunker mode") and not dollar_symbol_match:
+        return None
+    independent_symbol = bool(symbol and symbol.casefold() != name.casefold())
+    symbol_context = bool(independent_symbol and re.search(r"(?<![\w])" + re.escape(symbol) + r"(?![\w])", title))
+    paren_symbol = bool(independent_symbol and re.search(r"\(\s*" + re.escape(symbol) + r"\s*\)", title))
+    context_terms = ("crypto", "cryptocurrency", "token", "coin", "memecoin", "meme coin", "blockchain", "defi", "dex", "airdrop", "presale", "solana", "ethereum", "bnb chain", "robinhood chain", "pump.fun", "coingecko", "coinmarketcap")
+    crypto_context = symbol_context or paren_symbol or dollar_symbol_match or any(_contains(title, term) for term in context_terms)
+    return "title" if crypto_context else None
 
 
 def _mentions(source: str, name: str, symbol: str, now: datetime) -> dict:
-    quoted_name = f'"{name}" when:7d'
+    quoted_name = f'"{name}" (crypto OR token OR coin OR "{symbol}") when:7d' if source == "google_news" else f'"{name}"'
     if source == "google_news":
         url = "https://news.google.com/rss/search?q=" + quote_plus(quoted_name) + "&hl=en-US&gl=US&ceid=US:en"
         accept = "application/rss+xml, application/atom+xml"
@@ -210,13 +221,18 @@ def _mentions(source: str, name: str, symbol: str, now: datetime) -> dict:
 
 def _identity(coin_id: str, cached: dict | None, now: datetime) -> dict:
     cached = cached if isinstance(cached, dict) else {}
-    if cached and _timestamp(cached.get("cached_at_utc")) and (now - _timestamp(cached["cached_at_utc"])).total_seconds() < 7 * 86400:
+    cache_time = _timestamp(cached.get("cached_at_utc")) if cached else None
+    cache_age = (now - cache_time).total_seconds() if cache_time else None
+    if cached and cache_time and 0 <= cache_age <= 7 * 86400:
         platforms = cached.get("platforms") or {}
+        identity_source = "CACHE"
     else:
         url = f"https://api.coingecko.com/api/v3/coins/{quote(coin_id, safe='')}?localization=false&tickers=false&market_data=false&community_data=false&developer_data=false"
-        detail = _json(url, "coingecko")
+        detail = _identity_json(url)
         platforms = detail.get("platforms") or {}
         cached.update({"cached_at_utc": _iso(now), "platforms": platforms})
+        identity_source = "FRESH"
+        cache_age = 0
     contracts = []
     malformed_chains = []
     for chain, address in platforms.items():
@@ -246,7 +262,51 @@ def _identity(coin_id: str, cached: dict | None, now: datetime) -> dict:
     if not warning_parts and status == "UNKNOWN":
         warning_parts.append("Contract unavailable.")
     warning = " ".join(warning_parts) or None
-    return {"status": status, "contracts": contracts, "warning": warning}
+    warning_parts.append((f"Contract data from cache, {_age_label(cache_age)}.") if identity_source == "CACHE" else "")
+    return {"status": status, "contracts": contracts, "warning": " ".join(part for part in warning_parts if part) or None, "source": identity_source, "cached_age_seconds": cache_age if identity_source == "CACHE" else None}
+
+
+def _age_label(seconds: float | None) -> str:
+    seconds = max(0, int(seconds or 0))
+    if seconds < 3600:
+        return f"{seconds // 60} minutes"
+    if seconds < 86400:
+        return f"{seconds // 3600} hours"
+    return f"{seconds // 86400} days"
+
+
+def _identity_json(url: str) -> dict:
+    """Fetch an identity, honouring CoinGecko Retry-After once for 429s."""
+    global _cg_identity_stopped
+    if _cg_identity_stopped:
+        raise HTTPError(url, 429, "identity lookups stopped after rate limit", None, None)
+    if _cg_identity_deadline is not None and _cg_identity_deadline - time.monotonic() < 20:
+        raise TimeoutError("identity lookup budget exhausted")
+    try:
+        return _json(url, "coingecko_identity")
+    except HTTPError as exc:
+        if exc.code != 429:
+            raise
+        retry_after = _timestamp(_last_response_headers.get("retry-after"))
+        if retry_after:
+            wait = min(60, max(0, (retry_after - _now()).total_seconds()))
+        else:
+            try:
+                wait = min(60, max(0, float(_last_response_headers.get("retry-after", 0) or 0)))
+            except (TypeError, ValueError):
+                wait = 0
+        if wait:
+            time.sleep(wait)
+        if _cg_identity_deadline is not None and _cg_identity_deadline - time.monotonic() < 20:
+            _cg_identity_stopped = True
+            raise exc
+        try:
+            return _json(url, "coingecko_identity")
+        except HTTPError as second:
+            if second.code == 429:
+                _cg_identity_stopped = True
+                raise
+            raise
 
 
 def _dex(contract: dict, now: datetime) -> list[dict]:
@@ -311,6 +371,10 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
     previous = previous if previous is not None else _old_capture()
     global _reddit_stopped
     _reddit_stopped = False
+    global _cg_identity_stopped
+    _cg_identity_stopped = False
+    global _cg_identity_deadline
+    _cg_identity_deadline = time.monotonic() + 330
     health = {}
     identity_cache = (previous or {}).get("identity_cache") or {}
     try:
@@ -339,7 +403,8 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
             try:
                 identity = _identity(coin_id, identity_cache[coin_id], captured_at)
             except Exception as exc:
-                identity = {"status": "UNKNOWN", "contracts": [], "warning": "Contract unavailable.", "error_class": type(exc).__name__}
+                status = getattr(exc, "code", None)
+                identity = {"status": "LOOKUP_FAILED", "contracts": [], "warning": "Contract lookup failed this capture (CoinGecko limit). Retry next hour", "error_class": type(exc).__name__, "http_status": status}
         else:
             identity = old.get("identity") or {"status": "UNKNOWN", "contracts": [], "warning": "Contract lookup deferred by request budget."}
         if rank <= enriched:
@@ -395,10 +460,13 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
         vals = [item["mentions"][source] for item in items if item["mentions"][source]["status"] != "NOT_QUERIED"]
         failed = sum(value["status"] != "FRESH" for value in vals)
         status = "FAILED" if vals and failed == len(vals) else "DEGRADED" if failed else "FRESH" if vals else "NOT_QUERIED"
-        health[source] = {"status": status, "captured_at_utc": _iso(captured_at), "age_seconds": 0, "queried_count": len(vals), "response_count": len(vals) - failed, "error_class": "SOURCE_FAILURE" if failed else None, "coverage_pct": (len(vals) - failed) / len(vals) * 100 if vals else None}
-    identity_errors = sum(bool(item["identity"].get("error_class")) for item in items)
+        rate_limited = source == "reddit" and any(value.get("error_class") in {"RATE_LIMITED", "HTTP_429"} for value in vals)
+        health[source] = {"status": status, "captured_at_utc": _iso(captured_at), "age_seconds": 0, "queried_count": len(vals), "response_count": len(vals) - failed, "error_class": "RATE_LIMITED" if rate_limited else "SOURCE_FAILURE" if failed else None, "coverage_pct": (len(vals) - failed) / len(vals) * 100 if vals else None}
+    identity_errors = sum(item["identity"].get("status") == "LOOKUP_FAILED" for item in items)
     identity_queried = min(enriched, len(items))
-    health["coingecko_identity"] = {"status": "DEGRADED" if identity_errors else "FRESH" if identity_queried else "NOT_QUERIED", "captured_at_utc": _iso(captured_at), "age_seconds": 0, "queried_count": identity_queried, "response_count": sum(bool((item.get("identity") or {}).get("contracts")) for item in items), "error_class": "identity_fetch_failed" if identity_errors else None, "coverage_pct": 100.0 * (identity_queried - identity_errors) / identity_queried if identity_queried else None}
+    identity_cache_hits = sum((item.get("identity") or {}).get("source") == "CACHE" for item in items)
+    identity_fresh = sum((item.get("identity") or {}).get("source") == "FRESH" for item in items)
+    health["coingecko_identity"] = {"status": "DEGRADED" if identity_errors else "FRESH" if identity_queried else "NOT_QUERIED", "captured_at_utc": _iso(captured_at), "age_seconds": 0, "queried_count": identity_queried, "fresh_fetch_count": identity_fresh, "cache_hit_count": identity_cache_hits, "response_count": identity_fresh + identity_cache_hits, "error_class": "identity_fetch_failed" if identity_errors else None, "coverage_pct": 100.0 * (identity_queried - identity_errors) / identity_queried if identity_queried else None}
     dex_contracts = [contract for item in items for contract in (item.get("identity") or {}).get("contracts", []) if contract.get("dex_chain")]
     dex_failed = sum(contract.get("dex_status") == "FAILED" for contract in dex_contracts)
     dex_success = sum(contract.get("dex_status") == "FRESH" for contract in dex_contracts)
@@ -407,6 +475,7 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
     result = {"schema_version": "social-context.v2", "status": "NO_DATA" if not items else "DEGRADED" if any(status in {"FAILED", "DEGRADED"} for status in statuses) else "READY", "captured_at_utc": _iso(captured_at), "previous_capture_at_utc": previous.get("captured_at_utc") if previous else None, "research_only": True, "trade_authorization": False, "execution_allowed": False, "source_health": health, "items": items, "identity_cache": identity_cache, "attribution": "Trending and token identity data provided by CoinGecko."}
     if not validate_social_context(result):
         raise ValueError("collector emitted invalid social-context.v2")
+    _cg_identity_deadline = None
     return result
 
 

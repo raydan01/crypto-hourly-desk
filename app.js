@@ -28,7 +28,6 @@ function utcAgeSeconds(value) {
 }
 
 function renderDataStale(reason) {
-  renderSocial(hypeSnapshot);
   $("#scan-status").textContent = "DATA STALE";
   $("#scan-summary").textContent = `${reason} Build ${APP_BUILD_ID}. No setup or price map is actionable until a complete live refresh succeeds.`;
   $("#opportunities").innerHTML = `<div class="panel"><strong>DATA STALE — NO SIGNAL</strong><p class="muted">${escapeHtml(reason)}</p><p class="muted">Required: ${MAX_LIVE_QUOTE_AGE_SECONDS}-second maximum quote age, complete candidate coverage, and compatible fresh range data.</p></div>`;
@@ -36,6 +35,10 @@ function renderDataStale(reason) {
 
 function liveFreshness(targetSnapshot = snapshot) {
   if (!targetSnapshot || !Array.isArray(targetSnapshot.candidates) || !targetSnapshot.candidates.length) return {ok: false, reason: "No market snapshot is loaded."};
+  if (targetSnapshot.artifact_refresh_status === "FAILED") {
+    const captured = targetSnapshot.generated_at_utc ? ` (artifact captured ${new Date(targetSnapshot.generated_at_utc).toLocaleString()})` : " (no successful artifact capture is available)";
+    return {ok: false, reason: `${modeConfig[activeMode].title} artifact refresh failed${captured}; displayed candidates are stale.`};
+  }
   const expected = Number(targetSnapshot.live_quote_expected_count || targetSnapshot.candidates.length);
   const received = Number(targetSnapshot.live_quote_count || 0);
   const missing = targetSnapshot.candidates.filter(item => item.live_quote_status !== "FRESH").map(item => item.symbol).filter(Boolean);
@@ -117,7 +120,6 @@ function orderDisplayChoices(items) {
 }
 
 function render() {
-  renderSocial(hypeSnapshot);
   const freshness = liveFreshness();
   if (!freshness.ok) {
     renderDataStale(freshness.reason);
@@ -135,11 +137,11 @@ function render() {
   const directionLabel = activeDirection === "all" ? "all directions" : activeDirection === "LONG_RESEARCH" ? "long opportunities" : activeDirection === "SHORT_RESEARCH" ? "short opportunities" : "avoid/watch markets";
   $("#scan-summary").textContent = `${choices.length} ${directionLabel} ranked by market-only score · ${setupCount} setup${setupCount === 1 ? "" : "s"} cleared the latest screen${selection} · captured ${new Date(snapshot.generated_at_utc).toLocaleString()} · WATCH ONLY cards are monitoring-only.`;
   const artifactAge = utcAgeSeconds(snapshot.generated_at_utc);
-  $("#scan-summary").textContent += ` Â· live quotes ${snapshot.live_quote_source || "unknown source"}, ${freshness.age.toFixed(0)}s old (${snapshot.live_quote_count}/${snapshot.live_quote_expected_count}) Â· artifact age ${artifactAge == null ? "unknown" : `${Math.max(0, artifactAge).toFixed(0)}s`} Â· build ${APP_BUILD_ID}.`;
+  $("#scan-summary").textContent += ` · live quotes ${snapshot.live_quote_source || "unknown source"}, ${freshness.age.toFixed(0)}s old (${snapshot.live_quote_count}/${snapshot.live_quote_expected_count}) · artifact age ${artifactAge == null ? "unknown" : `${Math.max(0, artifactAge).toFixed(0)}s`} · build ${APP_BUILD_ID}.`;
   $("#opportunities").innerHTML = choices.length ? choices.map(card).join("") : `<div class="panel"><strong>No directional setup cleared this hour.</strong><p class="muted">${bearish} bearish candidate${bearish === 1 ? " was" : "s were"} found in the latest scan. All labels are monitoring-only until independently verified.</p></div>`;
 }
 
-function renderSocial(social) {
+function renderHype(social) {
   if (!social) {
     $("#social-status").textContent = "HYPE DATA UNAVAILABLE";
     $("#social-summary").textContent = "Hype data unavailable. The Hype artifact could not be loaded.";
@@ -157,7 +159,7 @@ function renderSocial(social) {
   const captureAgeLabel = captureAge == null ? "age unknown" : captureAge < 3600 ? `${Math.max(0, Math.floor(captureAge / 60))}m old` : `${(Math.max(0, captureAge) / 3600).toFixed(1)}h old`;
   const attribution = social.attribution || "CoinGecko attribution applies when its data is present.";
   $("#social-summary").textContent = items.length ? `${items.length} CoinGecko trending projects · capture ${captured} (${captureAgeLabel}; stale after 2h). Counts below are matching, dated RSS items; collector target is hourly. ${attribution}` : `No Hype data available · capture ${captured} (${captureAgeLabel}). ${attribution}`;
-  $("#social-health").innerHTML = Object.entries(health).map(([name, value]) => `<span>${escapeHtml(name.replaceAll("_", " "))}: <strong>${escapeHtml(value.status || "UNKNOWN")}</strong></span>`).join("");
+  $("#social-health").innerHTML = Object.entries(health).map(([name, value]) => `<span>${escapeHtml(name.replaceAll("_", " "))}: <strong>${value.error_class === "RATE_LIMITED" ? "rate-limited" : escapeHtml(value.status || "UNKNOWN")}</strong></span>`).join("");
   const formatAge = seconds => seconds == null || !Number.isFinite(seconds) ? "age unknown" : seconds < 3600 ? `${Math.floor(seconds / 60)}m ago` : seconds < 86400 ? `${(seconds / 3600).toFixed(1)}h ago` : `${(seconds / 86400).toFixed(1)}d ago`;
   const ageAt = timestamp => { const parsed = Date.parse(timestamp || ""); if (!Number.isFinite(parsed)) return "age unknown"; const seconds = (Date.now() - parsed) / 1000; return seconds < -5 ? "age unknown" : formatAge(Math.max(0, seconds)); };
   const newestMentionAt = item => [item.mentions?.google_news?.newest_published_at_utc, item.mentions?.reddit?.newest_published_at_utc].filter(Boolean).sort((left, right) => Date.parse(right) - Date.parse(left))[0] || null;
@@ -171,6 +173,7 @@ function renderSocial(social) {
   };
   const identity = item => {
     const contracts = item.identity?.contracts || [];
+    if (item.identity?.status === "LOOKUP_FAILED") return `<p class="muted">Contract lookup failed this capture (CoinGecko limit). Retry next hour</p>`;
     if (!contracts.length) return `<p class="muted">Identity: ${escapeHtml(item.identity?.status === "MALFORMED" ? "MALFORMED: " : "")}${escapeHtml(item.identity?.warning || "contract unavailable")}. No name based market links.</p>`;
     return `<ul class="contract-list">${contracts.map(contract => `<li><strong>${escapeHtml(contract.chain)}${contract.status === "MALFORMED" ? " MALFORMED" : ""}</strong><code>${escapeHtml(contract.address)}</code><button type="button" class="copy-address" data-address="${escapeHtml(contract.address)}">Copy</button>${contract.explorer_url ? `<a href="${escapeHtml(contract.explorer_url)}" target="_blank" rel="noopener noreferrer">Explorer</a>` : ""}${contract.dex_url ? `<a href="${escapeHtml(contract.dex_url)}" target="_blank" rel="noopener noreferrer">DEX Screener</a>` : ""}</li>`).join("")}</ul>${item.identity?.warning ? `<p class="muted">${escapeHtml(item.identity.warning)}</p>` : ""}${contracts.length > 1 ? `<p class="muted">Multiple contract addresses; each chain is listed separately.</p>` : ""}`;
   };
@@ -323,26 +326,36 @@ function recalculateLiveRanking(targetSnapshot = snapshot) {
 }
 
 async function refreshAllSnapshots() {
-  const [results, hypeResult] = await Promise.all([Promise.all(Object.entries(modeConfig).map(async ([mode, config]) => {
+  const results = await Promise.all(Object.entries(modeConfig).map(async ([mode, config]) => {
     try {
       return {mode, snapshot: await fetchFreshJson(config.file)};
     } catch (error) {
       return {mode, error: error.message || String(error)};
     }
-  })), fetchFreshJson("data/social-context-v2-latest.json").then(snapshot => ({snapshot})).catch(error => ({error: error.message || String(error)}))]);
-  hypeSnapshot = hypeResult.snapshot || null;
-  renderSocial(hypeSnapshot);
+  }));
   const next = {...snapshotsByMode};
   const failures = [];
   for (const result of results) {
-    if (result.snapshot) next[result.mode] = result.snapshot;
-    else failures.push(`${modeConfig[result.mode].title}: artifact refresh failed after 3 attempts (${result.error})`);
+    if (result.snapshot) next[result.mode] = {...result.snapshot, artifact_refresh_status: "FRESH"};
+    else {
+      if (next[result.mode]) next[result.mode] = {...next[result.mode], artifact_refresh_status: "FAILED"};
+      failures.push(`${modeConfig[result.mode].title}: artifact refresh failed after 3 attempts (${result.error})`);
+    }
   }
-  if (!next[activeMode]) throw new Error(failures.join(" ") || "No schedule snapshot is available.");
   snapshotsByMode = next;
-  snapshot = snapshotsByMode[activeMode];
+  snapshot = snapshotsByMode[activeMode] || null;
   refreshFailures = failures;
+  if (!snapshot) throw new Error(failures.join(" ") || "No schedule snapshot is available.");
   return failures;
+}
+
+async function loadHype() {
+  try {
+    hypeSnapshot = await fetchFreshJson("data/social-context-v2-latest.json");
+  } catch {
+    hypeSnapshot = null;
+  }
+  renderHype(hypeSnapshot);
 }
 
 async function refreshAllLiveQuotes() {
@@ -383,6 +396,7 @@ async function runDeepScanLegacy() {
   button.disabled = true; $("#refresh-button").disabled = true; button.textContent = "Scanning history…"; $("#scan-status").textContent = "DEEP SCANNING";
   const startedAt = performance.now();
   try {
+    loadHype();
     await refreshLiveQuotes();
     if (!snapshot.live_quote_complete) throw new Error(`complete live quote refresh failed (${snapshot.live_quote_count}/${snapshot.live_quote_expected_count})`);
     recalculateLiveRanking();
@@ -433,6 +447,7 @@ async function runDeepScan() {
   button.disabled = true; $("#refresh-button").disabled = true; button.textContent = "Scanning all horizons…"; $("#scan-status").textContent = "DEEP SCANNING";
   const startedAt = performance.now();
   try {
+    loadHype();
     await refreshAllSnapshots();
     await refreshAllLiveQuotes();
     if (!liveFreshness(snapshot).ok) throw new Error(liveFreshness(snapshot).reason);
@@ -531,14 +546,14 @@ async function bootLegacy({manual = false} = {}) {
     if (!freshness.ok) throw new Error(freshness.reason);
     render();
     const liveTime = snapshot.live_quote_updated_at_utc ? new Date(snapshot.live_quote_updated_at_utc).toLocaleTimeString([], {hour: "numeric", minute: "2-digit"}) : "unavailable";
-    const socialTime = snapshot.social_context?.captured_at_utc ? new Date(snapshot.social_context.captured_at_utc).toLocaleString() : "unavailable";
-    $("#scan-summary").textContent += ` · Live Kraken quotes updated ${liveTime} (${liveCount}/${snapshot.candidates.length}); market artifact captured ${new Date(snapshot.generated_at_utc).toLocaleString()}; social/news artifact captured ${socialTime}.`;
+    $("#scan-summary").textContent += ` · Live Kraken quotes updated ${liveTime} (${liveCount}/${snapshot.candidates.length}); market artifact captured ${new Date(snapshot.generated_at_utc).toLocaleString()}.`;
     if (manual && previousTimestamp && previousTimestamp === snapshot.generated_at_utc) { $("#scan-status").textContent = `LIVE ${modeConfig[activeMode].title}`; }
   }
   catch (error) { renderDataStale(`Live market refresh failed: ${error.message}`); }
   finally { button.disabled = false; button.textContent = "Quick scan"; }
 }
 async function boot({manual = false} = {}) {
+  loadHype();
   if (!modeConfig[activeMode]) activeMode = "hourly";
   $("#deep-scan-button").disabled = false; $("#deep-scan-button").textContent = "Deep scan";
   const button = $("#refresh-button");
@@ -552,14 +567,16 @@ async function boot({manual = false} = {}) {
     const freshness = liveFreshness(snapshot);
     if (!freshness.ok) throw new Error(freshness.reason);
     render();
-    const socialTime = snapshot.social_context?.captured_at_utc ? new Date(snapshot.social_context.captured_at_utc).toLocaleString() : "unavailable";
-    const freshModes = Object.values(snapshotsByMode).filter(item => liveFreshness(item).ok).length;
-    $("#scan-summary").textContent += ` · All schedules refreshed (${freshModes}/${Object.keys(modeConfig).length}); social/news context captured ${socialTime}; up to 3 attempts per source.`;
+    const freshArtifacts = Object.values(snapshotsByMode).filter(item => item.artifact_refresh_status !== "FAILED").length;
+    const artifactSummary = `Schedule artifacts refreshed (${freshArtifacts}/${Object.keys(modeConfig).length})`;
+    $("#scan-summary").textContent += ` · ${artifactSummary}; live quote freshness is reported separately; up to 3 attempts per source.`;
     if (refreshFailures.length) $("#scan-summary").textContent += ` · REFRESH DEGRADED: ${refreshFailures.join(" | ")}`;
     if (manual && previousTimestamp && previousTimestamp === snapshot.generated_at_utc) $("#scan-status").textContent = `LIVE ${modeConfig[activeMode].title}`;
   } catch (error) {
     snapshot = snapshotsByMode[activeMode] || null;
-    renderDataStale(`Full refresh failed after retries: ${error.message}`);
+    const artifacts = Object.values(snapshotsByMode).filter(item => item.artifact_refresh_status !== "FAILED").length;
+    const artifactDetail = refreshFailures.length ? ` Schedule artifacts refreshed (${artifacts}/${Object.keys(modeConfig).length}): ${refreshFailures.join(" | ")}.` : "";
+    renderDataStale(`Full refresh failed after retries: ${String(error.message || error).replace(/[.]+$/, "")}.${artifactDetail} Live quote freshness is separate.`);
   } finally { button.disabled = false; button.textContent = "Quick scan"; }
 }
 
