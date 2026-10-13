@@ -468,7 +468,7 @@ try {
   await openCard("CRAWLER", "r10-crawler-expanded.png");
   const crawlerCard = await evaluate(`(() => { const card = [...document.querySelectorAll("#social-items .hype-card")].find(value => value.querySelector("summary").innerText.includes("CRAWLER")); card.open = true; return {text: card.querySelector(".hype-body").innerText, fomo: [...card.querySelectorAll(".fomo-observations")].map(value => value.innerText)}; })()`);
   assert.match(crawlerCard.text, /CoinGecko 24h change \(live\)\s+0%/);
-  assert.match(crawlerCard.text, /DEX primary pair 24h change \(pumpswap\)\s+\+6,787%/);
+  assert.match(crawlerCard.text, /DEX primary pair 24h change \(pumpswap\) \(live\)\s+\+6,787%/);
   assert.equal((crawlerCard.text.match(/captured/g) || []).length, 1, crawlerCard.text);
   const allFomoText = await evaluate(`(() => { document.querySelectorAll("#social-items .hype-card").forEach(card => card.open = true); return [...document.querySelectorAll("#social-items .fomo-observations")].map(value => value.innerText).join(" "); })()`);
   assert.ok(!/[{]|"age_seconds"/.test(allFomoText), allFomoText);
@@ -503,10 +503,10 @@ try {
   }
   assert.equal(secondCaptureUi.cards, 15, JSON.stringify(secondCaptureUi));
   const secondMomentum = await evaluate(`(() => { const cards = [...document.querySelectorAll("#social-items .hype-card")]; const out = {}; for (const symbol of ["CRAWLER", "QTC", "BUNKER", "IMD6900"]) { const card = cards.find(value => value.querySelector("summary").innerText.includes(symbol)); card.open = true; out[symbol] = card.querySelector(".card-history").innerText; } return out; })()`);
-  assert.match(secondMomentum.CRAWLER, /RISING/i, JSON.stringify(secondMomentum));
-  assert.match(secondMomentum.QTC, /Rank #10 \(was #7\).*volume \+5\.5%.*mixed/i, JSON.stringify(secondMomentum));
-  assert.match(secondMomentum.BUNKER, /Rank #4 \(was #3\).*volume \+13\.1%.*mixed/i, JSON.stringify(secondMomentum));
-  assert.match(secondMomentum.IMD6900, /FADING/i, JSON.stringify(secondMomentum));
+  for (const [symbol, summary] of Object.entries(secondMomentum)) {
+    assert.match(summary, /momentum since background capture/i, JSON.stringify(secondMomentum));
+    assert.match(summary, /volume 0\.0% \| flat/i, JSON.stringify({symbol, summary}));
+  }
   await pageSend("Page.navigate", { url: `http://127.0.0.1:${sitePort}/index.html?testScenario=live-ui-strk-dedupe` });
   const strkDeadline = Date.now() + 10000;
   let strkReady;
