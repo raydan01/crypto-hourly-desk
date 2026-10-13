@@ -9,6 +9,32 @@ FIXTURES = Path(__file__).parent / "fixtures" / "recorded"
 FIXTURE = Path(__file__).parent / "fixtures" / "google-news-live-recorded.xml"
 
 
+def test_identity_validates_only_known_chain_formats_and_uses_coin_detail_market_change(monkeypatch):
+    requested = []
+
+    def detail(url):
+        requested.append(url)
+        return {"platforms": {"near-protocol": "qtc.omft.near"}, "market_data": {"price_change_percentage_24h": 12.5}}
+
+    monkeypatch.setattr(social_context, "_identity_json", detail)
+    now = datetime(2026, 10, 13, 8, tzinfo=timezone.utc)
+    result = social_context._identity("quantus", {}, now)
+    contract = result["contracts"][0]
+    assert contract["status"] == "UNVERIFIED_FORMAT"
+    assert contract["address"] == "qtc.omft.near"
+    assert contract["dex_chain"] is None
+    assert contract["explorer_url"] is None
+    assert contract["dex_url"] is None
+    assert "Format not checked for near-protocol; no DEX lookup" in result["warning"]
+    assert result["market_change_24h_pct"] == 12.5
+    assert "market_data=true" in requested[0]
+
+    monkeypatch.setattr(social_context, "_identity_json", lambda _url: {"platforms": {"hyperliquid": "0x0d01dc56dcaaca66ad901c959b4011ec"}, "market_data": {"price_change_percentage_24h": None}})
+    hype = social_context._identity("hyperliquid", {}, now)["contracts"][0]
+    assert hype["status"] == "UNVERIFIED_FORMAT"
+    assert hype["dex_status"] == "UNSUPPORTED"
+
+
 def test_recorded_google_news_titles_require_asset_and_crypto_context(monkeypatch):
     recorded = FIXTURE.read_bytes()
     requested = []

@@ -29,7 +29,9 @@ function mime(file) {
 }
 
 const uiFixtureData = JSON.parse(fs.readFileSync(path.join(ROOT, "tests", "fixtures", "social-context-v2-ui.json"), "utf8"));
+uiFixtureData.captured_at_utc = new Date().toISOString();
 uiFixtureData.source_health.reddit = { status: "DEGRADED", error_class: "RATE_LIMITED" };
+const recordedLiveFixture = fs.readFileSync(path.join(ROOT, "tests", "fixtures", "recorded", "live-collector-output-f494d74.json"));
 const dexCases = [
   ["failed", "FAILED", "HTTPError", "DEX Screener lookup failed (HTTPError); pairs unknown"],
   ["empty", "FRESH", null, "No DEX pairs found for this address"],
@@ -69,7 +71,7 @@ const server = http.createServer((request, response) => {
   if (pathname === "/data/social-context-v2-latest.json") {
     if (scenario === "hype-missing") { response.writeHead(404).end("missing Hype fixture"); return; }
     response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-    response.end(scenario === "identity-failure" ? identityFailureFixture : uiFixture);
+    response.end(scenario === "live-ui" ? recordedLiveFixture : scenario === "identity-failure" ? identityFailureFixture : uiFixture);
     return;
   }
   if (scenario === "trading-hangs" && pathname === "/data/market-opportunities-hourly-latest.json") return;
@@ -375,8 +377,55 @@ try {
   assert.equal(deepColdStart.status, "DEEP SCAN PARTIAL", JSON.stringify(deepColdStart));
   assert.ok(deepColdStart.summary.includes("schedule artifacts refreshed (2/3)"), JSON.stringify(deepColdStart));
   assert.ok(deepColdStart.summary.includes("WEEKLY TRADING no prior capture"), JSON.stringify(deepColdStart));
+  await pageSend("Page.navigate", { url: `http://127.0.0.1:${sitePort}/index.html?testScenario=live-ui` });
+  await pageSend("Emulation.setDeviceMetricsOverride", { width: 375, height: 812, deviceScaleFactor: 1, mobile: true });
+  const liveUiDeadline = Date.now() + 10000;
+  let liveUi;
+  while (Date.now() < liveUiDeadline) {
+    liveUi = await evaluate(`({cards: document.querySelectorAll("#social-items .hype-card").length, status: document.querySelector("#social-status")?.textContent, scrollY: window.scrollY})`);
+    if (liveUi.cards === 15) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.equal(liveUi.cards, 15, JSON.stringify(liveUi));
+  assert.equal(liveUi.scrollY, 0, JSON.stringify(liveUi));
+  assert.ok(await evaluate(`!document.querySelector("#hype-view .notice")`), "Manual review banner must stay on Trading");
+  const firstRow = await evaluate(`(() => { const row = document.querySelector("#social-items .hype-card"); const rect = row.getBoundingClientRect(); return {top: rect.top, bottom: rect.bottom, width: document.documentElement.scrollWidth}; })()`);
+  assert.ok(firstRow.top < 812 && firstRow.bottom <= 812, JSON.stringify(firstRow));
+  assert.ok(firstRow.width <= 375, JSON.stringify(firstRow));
+  const firstRowLines = await evaluate(` [...document.querySelector("#social-items .hype-card .summary-lines").children].map(line => line.innerText)`);
+  assert.equal(firstRowLines.length, 3, JSON.stringify(firstRowLines));
+  assert.match(firstRowLines[0], /Wisp.*WISP.*robinhood.*Trending #1/i, JSON.stringify(firstRowLines));
+  assert.match(firstRowLines[1], /24h .* \| Vol .* mcap \| pair .* old/i, JSON.stringify(firstRowLines));
+  assert.match(firstRowLines[2], /FOMO flags \| About this coin:/i, JSON.stringify(firstRowLines));
+  const warningBadge = await evaluate(`document.querySelector("#social-health span.warning")?.innerText || ""`);
+  assert.match(warningBadge, /reddit.*rate-limited/i, warningBadge);
+  const listPng = await pageSend("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+  fs.mkdirSync(path.join(ROOT, ".proof"), { recursive: true });
+  fs.writeFileSync(path.join(ROOT, ".proof", "r9-hype-list.png"), Buffer.from(listPng.data, "base64"));
+  const openCard = async (symbol, file) => {
+    await evaluate(`(() => { const card = [...document.querySelectorAll("#social-items .hype-card")].find(value => value.querySelector("summary").innerText.includes(${JSON.stringify(symbol)})); if (!card) throw new Error("Missing " + ${JSON.stringify(symbol)}); card.open = true; card.scrollIntoView({block: "start"}); })()`);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const shot = await pageSend("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+    fs.writeFileSync(path.join(ROOT, ".proof", file), Buffer.from(shot.data, "base64"));
+  };
+  await openCard("CRAWLER", "r9-crawler-expanded.png");
+  const crawlerCard = await evaluate(`(() => { const card = [...document.querySelectorAll("#social-items .hype-card")].find(value => value.querySelector("summary").innerText.includes("CRAWLER")); card.open = true; return {text: card.querySelector(".hype-body").innerText, fomo: [...card.querySelectorAll(".fomo-observations")].map(value => value.innerText)}; })()`);
+  assert.match(crawlerCard.text, /CoinGecko 24h change\s+unknown/);
+  assert.match(crawlerCard.text, /DEX primary pair 24h change \(pumpswap\)\s+\+6,787%/);
+  assert.equal((crawlerCard.text.match(/captured/g) || []).length, 1, crawlerCard.text);
+  const allFomoText = await evaluate(`(() => { document.querySelectorAll("#social-items .hype-card").forEach(card => card.open = true); return [...document.querySelectorAll("#social-items .fomo-observations")].map(value => value.innerText).join(" "); })()`);
+  assert.ok(!/[{]|"age_seconds"/.test(allFomoText), allFomoText);
+  const identityText = await evaluate(`(() => { const cards = [...document.querySelectorAll("#social-items .hype-card")]; const results = {}; for (const symbol of ["QTC", "HYPE"]) { const card = cards.find(value => value.querySelector("summary").innerText.includes(symbol)); card.open = true; results[symbol] = card.querySelector(".hype-body").innerText; } return results; })()`);
+  for (const symbol of ["QTC", "HYPE"]) {
+    assert.ok(identityText[symbol].includes("UNVERIFIED_FORMAT"), `${symbol}: ${identityText[symbol]}`);
+    assert.ok(!identityText[symbol].includes("Malformed"), `${symbol}: ${identityText[symbol]}`);
+  }
+  assert.equal(await evaluate(`(() => { const cards = [...document.querySelectorAll("#social-items .hype-card")]; return ["QTC", "HYPE"].every(symbol => { const card = cards.find(value => value.querySelector("summary").innerText.includes(symbol)); return [...card.querySelectorAll(".contract-list a")].length === 0; }); })()`), true);
+  const linkContrast = await evaluate(`(() => { const link = document.querySelector("#social-items .pair-row a"); const background = getComputedStyle(link.closest(".pair-row")).backgroundColor; const foreground = getComputedStyle(link).color; const luminance = color => { const values = color.match(/[\\d.]+/g).slice(0, 3).map(Number).map(value => value / 255).map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4); return 0.2126 * values[0] + 0.7152 * values[1] + 0.0722 * values[2]; }; const ratio = (a, b) => (Math.max(luminance(a), luminance(b)) + 0.05) / (Math.min(luminance(a), luminance(b)) + 0.05); return {foreground, background, ratio: ratio(foreground, background)}; })()`);
+  assert.ok(linkContrast.ratio >= 4.5, JSON.stringify(linkContrast));
+  await openCard("PENGU", "r9-pengu-expanded.png");
   assert.deepEqual(exceptions, []);
-  console.log(JSON.stringify({ browser: "Microsoft Edge headless CDP", viewport: "390x844", initial, quickFailure, hanging, failedHourlyArtifactRequests, tradingFailureState, expanded, dexStatusChecks, trading, reverse, reverseTrading, deepPartial, quickColdStart, deepColdStart, failedDailyArtifactRequests, successfulTradingArtifactLoads, exceptions }, null, 2));
+  console.log(JSON.stringify({ browser: "Microsoft Edge headless CDP", viewport: "375x812 final acceptance", initial, quickFailure, hanging, failedHourlyArtifactRequests, tradingFailureState, expanded, dexStatusChecks, trading, reverse, reverseTrading, deepPartial, quickColdStart, deepColdStart, liveUi, firstRow, crawlerCard, failedDailyArtifactRequests, successfulTradingArtifactLoads, screenshots: [".proof/r9-hype-list.png", ".proof/r9-crawler-expanded.png", ".proof/r9-pengu-expanded.png"], exceptions }, null, 2));
 } finally {
   try { shutdownBrowser?.(); } catch {}
   try { ws?.close(); } catch {}

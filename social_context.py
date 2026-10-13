@@ -32,6 +32,7 @@ _CHAIN_MAP = {
     "base": ("base", "https://basescan.org/address/"),
     "robinhood": ("robinhood", "https://robinhoodchain.blockscout.com/address/"),
 }
+_EVM_FORMAT_CHAINS = set(_CHAIN_MAP) - {"solana"}
 _last_response_headers = {}
 _reddit_stopped = False
 _cg_identity_stopped = False
@@ -280,19 +281,27 @@ def _identity(coin_id: str, cached: dict | None, now: datetime) -> dict:
     if cached and cache_time and 0 <= cache_age <= 7 * 86400:
         platforms = cached.get("platforms") or {}
         identity_source = "CACHE"
+        market_change = None
     else:
-        url = f"https://api.coingecko.com/api/v3/coins/{quote(coin_id, safe='')}?localization=false&tickers=false&market_data=false&community_data=false&developer_data=false"
+        url = f"https://api.coingecko.com/api/v3/coins/{quote(coin_id, safe='')}?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false"
         detail = _identity_json(url)
         platforms = detail.get("platforms") or {}
         cached.update({"cached_at_utc": _iso(now), "platforms": platforms})
         identity_source = "FRESH"
         cache_age = 0
+        market_change = _number((detail.get("market_data") or {}).get("price_change_percentage_24h"))
     contracts = []
     malformed_chains = []
+    unverified_chains = []
     for chain, address in platforms.items():
         if not isinstance(chain, str) or not isinstance(address, str) or not address.strip():
             continue
         address = address.strip()
+        known_format = chain == "solana" or chain in _EVM_FORMAT_CHAINS
+        if not known_format:
+            unverified_chains.append(chain)
+            contracts.append({"chain": chain, "address": address, "status": "UNVERIFIED_FORMAT", "dex_chain": None, "explorer_url": None, "dex_url": None, "dex_status": "UNSUPPORTED"})
+            continue
         valid = bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", address)) if chain == "solana" else bool(re.fullmatch(r"0x[0-9a-fA-F]{40}", address))
         if not valid:
             malformed_chains.append(chain)
@@ -309,6 +318,8 @@ def _identity(coin_id: str, cached: dict | None, now: datetime) -> dict:
     warning_parts = []
     if malformed_chains:
         warning_parts.append("Malformed contract address for " + ", ".join(malformed_chains) + "; links and DEX lookup disabled.")
+    if unverified_chains:
+        warning_parts.extend(f"Format not checked for {chain}; no DEX lookup." for chain in unverified_chains)
     if unsupported:
         warning_parts.append("DEX lookup not supported for this chain.")
     if not warning_parts and status == "MULTIPLE":
@@ -317,7 +328,7 @@ def _identity(coin_id: str, cached: dict | None, now: datetime) -> dict:
         warning_parts.append("Contract unavailable.")
     warning = " ".join(warning_parts) or None
     warning_parts.append((f"Contract data from cache, {_age_label(cache_age)}.") if identity_source == "CACHE" else "")
-    return {"status": status, "contracts": contracts, "warning": " ".join(part for part in warning_parts if part) or None, "source": identity_source, "cached_age_seconds": cache_age if identity_source == "CACHE" else None}
+    return {"status": status, "contracts": contracts, "warning": " ".join(part for part in warning_parts if part) or None, "source": identity_source, "cached_age_seconds": cache_age if identity_source == "CACHE" else None, "market_change_24h_pct": market_change}
 
 
 def _age_label(seconds: float | None) -> str:
@@ -361,6 +372,15 @@ def _identity_json(url: str) -> dict:
                 _cg_identity_stopped = True
                 raise
             raise
+
+
+def _coin_market_change(coin_id: str) -> float | None:
+    url = f"https://api.coingecko.com/api/v3/coins/{quote(coin_id, safe='')}?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false"
+    try:
+        value = (_identity_json(url).get("market_data") or {}).get("price_change_percentage_24h")
+        return _number(value)
+    except Exception:
+        return None
 
 
 def _dex(contract: dict, now: datetime) -> list[dict]:
@@ -470,7 +490,6 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
         data = raw.get("data") or {}
         market_cap = _number(data.get("market_cap_value", data.get("market_cap")))
         volume = _number(data.get("total_volume_value", data.get("total_volume")))
-        change = (data.get("price_change_percentage_24h") or {}).get("usd")
         old = old_items.get(coin_id) or {}
         identity_cache.setdefault(coin_id, {})
         if rank <= enriched:
@@ -516,7 +535,10 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
         else:
             delta_mentions = sum(value for pair in mention_changes.values() for value in pair.values() if value is not None)
             state = "RISING" if rank_change > 0 or volume_change > 0 or delta_mentions > 0 else "FADING" if rank_change < 0 or volume_change < 0 or delta_mentions < 0 else "FLAT"
-        market = {"price_usd": _number(data.get("price_value", data.get("price"))), "market_cap_usd": market_cap, "volume_24h_usd": volume, "volume_market_cap_ratio": volume / market_cap if isinstance(volume, (int, float)) and isinstance(market_cap, (int, float)) and market_cap else None, "change_24h_pct": change, "captured_at_utc": _iso(captured_at)}
+        market_change = identity.get("market_change_24h_pct")
+        if identity.get("source") == "CACHE":
+            market_change = _coin_market_change(coin_id)
+        market = {"price_usd": _number(data.get("price_value", data.get("price"))), "market_cap_usd": market_cap, "volume_24h_usd": volume, "volume_market_cap_ratio": volume / market_cap if isinstance(volume, (int, float)) and isinstance(market_cap, (int, float)) and market_cap else None, "change_24h_pct": market_change, "change_24h_source": "CoinGecko /coins market_data" if market_change is not None else None, "captured_at_utc": _iso(captured_at)}
         observations = []
         for pair in dex_pairs:
             liq = pair.get("liquidity_usd")
@@ -527,8 +549,9 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
             if pair.get("age_seconds") is not None and pair["age_seconds"] < 86400: observations.append({"kind": "PAIR_UNDER_24H", "source": "DEX Screener", "age_seconds": pair["age_seconds"], "pair_age_seconds": pair["age_seconds"]})
             if isinstance(liq, (int, float)) and isinstance(denom, (int, float)) and denom > 0 and liq / denom < .05: observations.append({"kind": "LIQUIDITY_UNDER_5_PERCENT", "source": "DEX Screener", "age_seconds": pair.get("age_seconds"), "liquidity_usd": liq, "fdv_or_market_cap_usd": denom, "ratio_pct": liq / denom * 100})
             if isinstance(buys, (int, float)) and isinstance(sells, (int, float)) and min(buys, sells) >= 0 and max(buys, sells) >= 20 and max(buys, sells) >= 1.5 * max(1, min(buys, sells)): observations.append({"kind": "BUY_SELL_IMBALANCE", "source": "DEX Screener 24h transactions", "age_seconds": pair.get("age_seconds"), "buys_24h": buys, "sells_24h": sells})
+            pair_change = (pair.get("price_change_by_period") or {}).get("h24")
+            if pair.get("is_primary") and isinstance(pair_change, (int, float)) and abs(pair_change) > 100: observations.append({"kind": "DEX_PRICE_MOVE", "source": f"{pair.get('dex_id') or 'DEX'} DEX Screener 24h price move", "age_seconds": pair.get("age_seconds"), "change_24h_pct": pair_change})
         if isinstance(volume, (int, float)) and isinstance(market_cap, (int, float)) and volume > market_cap: observations.append({"kind": "VOLUME_ABOVE_MARKET_CAP", "source": "CoinGecko 24h volume and market cap", "age_seconds": 0, "volume_24h_usd": volume, "market_cap_usd": market_cap})
-        if isinstance(change, (int, float)) and change > 100: observations.append({"kind": "PRICE_MOVE_ABOVE_100_PERCENT", "source": "CoinGecko rolling 24h trending snapshot", "age_seconds": 0, "change_24h_pct": change})
         items.append({"coingecko_id": coin_id, "name": name, "symbol": symbol, "observed_at_utc": _iso(captured_at), "trending": {"rank": rank, "previous_rank": old.get("trending", {}).get("rank") if comparable else None, "change": rank_change, "state": state, "window": "rolling 24h"}, "market": market, "identity": identity, "mentions": {"google_news": news, "reddit": reddit}, "dex_pairs": dex_pairs, "momentum": {"rank_change": rank_change, "volume_change_pct": volume_change, "mention_change_by_source": mention_changes, "comparison_at_utc": comparison, "state": state}, "fomo_watch": {"status": "WATCH_ONLY" if observations else "NO_OBSERVATION" if dex_pairs else "UNKNOWN", "observations": observations, "disclaimer": "Descriptive observations only; no score, direction, or trade gate."}})
     for source in ("google_news", "reddit"):
         vals = [item["mentions"][source] for item in items if item["mentions"][source]["status"] != "NOT_QUERIED"]
