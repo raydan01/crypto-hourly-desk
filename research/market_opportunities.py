@@ -21,12 +21,7 @@ def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
 
 
 def score_candidate(item: Mapping[str, Any], social_item: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Combine market tradability and social/news context into a ranked score.
-
-    This is a deterministic confidence score, not a calibrated probability.
-    Social direction uses the current CoinGecko-trending 24h move when present;
-    news and Reddit counts add attention/confidence but do not imply sentiment.
-    """
+    """Build a deterministic market-only research score, not a probability."""
     metrics = item.get("metrics") or {}
     change = float(metrics.get("change_24h_pct") or 0.0)
     spread = max(0.0, float(metrics.get("spread_bps") or 0.0))
@@ -38,23 +33,15 @@ def score_candidate(item: Mapping[str, Any], social_item: Mapping[str, Any] | No
     spread_score = max(0.0, 100.0 - spread * 10.0)
     volatility_score = max(0.0, 100.0 - abs(volatility - 0.04) * 1200.0)
     market_score = round(directional_strength * 0.45 + liquidity_score * 0.25 + spread_score * 0.15 + volatility_score * 0.15, 2)
-    social = social_item or {}
-    attention = max(0.0, min(100.0, float(social.get("attention_score") or 0.0)))
-    counts = social.get("source_counts") or {}
-    source_bonus = min(20.0, float(counts.get("google_news") or 0) * 0.5 + float(counts.get("reddit") or 0) * 1.0)
-    social_score = round(min(100.0, attention * 0.8 + source_bonus), 2)
-    social_change = social.get("price_change_24h_pct")
-    social_direction = _clamp(float(social_change) / 5.0) if social_change is not None else 0.0
-    combined_direction = round(market_direction * 0.70 + social_direction * 0.30, 4)
-    score = round(market_score * 0.70 + social_score * 0.30, 2)
-    if combined_direction >= 0.25:
+    score = market_score
+    if market_direction >= 0.25:
         bias = "LONG_RESEARCH"
-    elif combined_direction <= -0.25:
+    elif market_direction <= -0.25:
         bias = "SHORT_RESEARCH"
     else:
         bias = "AVOID"
     band = "HIGH" if score >= 70 else ("MODERATE" if score >= 45 else "LOW")
-    return {"score": score, "band": band, "bias": bias, "market_score": market_score, "social_score": social_score, "market_direction": round(market_direction, 4), "social_direction": round(social_direction, 4), "combined_direction": combined_direction, "social_sources": list(social.get("sources") or [])}
+    return {"score": score, "band": band, "bias": bias, "market_score": market_score, "market_direction": round(market_direction, 4)}
 
 
 def _utc(value: str) -> datetime:

@@ -9,6 +9,9 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("playwright.sync_api", reason="Playwright is not installed; use the local Edge CDP proof instead")
 from playwright.sync_api import sync_playwright
 
 
