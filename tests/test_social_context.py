@@ -246,6 +246,45 @@ def test_related_buzz_does_not_change_mention_momentum(monkeypatch):
     assert item["momentum"]["state"] == "FLAT"
 
 
+def test_trend_momentum_uses_rank_and_five_percent_volume_thresholds(monkeypatch):
+    now = datetime(2026, 10, 13, 9, tzinfo=timezone.utc)
+    rows = [
+        ("improved", 110, 3, "RISING"),
+        ("rank-down-volume-up", 105.5, 1, "MIXED"),
+        ("rank-down-volume-up-more", 113, 2, "MIXED"),
+        ("rank-down-volume-down", 88.2, 3, "FADING"),
+        ("unchanged-under-threshold", 104.9, 5, "FLAT"),
+    ]
+    monkeypatch.setattr(social_context, "_json", lambda _url, _source: {"coins": [
+        {"item": {"id": coin_id, "name": coin_id, "symbol": coin_id.upper(), "data": {"total_volume": volume, "market_cap": 1000}}}
+        for coin_id, volume, _old_rank, _state in rows
+    ]})
+    monkeypatch.setattr(social_context, "_identity", lambda _coin_id, _cached, _captured: {"status": "UNKNOWN", "contracts": [], "warning": "Contract unavailable."})
+    monkeypatch.setattr(social_context, "_dex", lambda _contract, _captured: [])
+    monkeypatch.setattr(social_context, "_mentions", lambda _source, _name, _symbol, _captured: {
+        "status": "FRESH", "coin_count_24h": 100, "coin_count_7d": 100,
+        "related_count_24h": 0, "related_count_7d": 0, "listing_count_7d": 0,
+        "headlines": [], "related_headlines": [],
+    })
+    prior = {
+        "captured_at_utc": "2026-10-13T08:00:00Z",
+        "items": [
+            {
+                "coingecko_id": coin_id,
+                "trending": {"rank": old_rank},
+                "market": {"volume_24h_usd": 100},
+                "mentions": {
+                    source: {"status": "FRESH", "coin_count_24h": 0, "coin_count_7d": 0}
+                    for source in ("google_news", "reddit")
+                },
+            }
+            for coin_id, _volume, old_rank, _state in rows
+        ],
+    }
+    result = social_context.build_social_context(max_trending=len(rows), enriched=len(rows), previous=prior, now=now)
+    assert [item["momentum"]["state"] for item in result["items"]] == [state for _coin_id, _volume, _rank, state in rows]
+
+
 def test_v2_validation_requires_all_mention_categories():
     entry = {"status": "FRESH", "coin_count_24h": 0, "coin_count_7d": 0, "related_count_24h": 0, "related_count_7d": 0, "listing_count_7d": 0, "headlines": [], "related_headlines": []}
     value = {"schema_version": "social-context.v2", "research_only": True, "trade_authorization": False, "execution_allowed": False, "source_health": {}, "items": [{"mentions": {"google_news": dict(entry), "reddit": dict(entry)}}]}

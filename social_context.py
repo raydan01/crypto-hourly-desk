@@ -533,8 +533,16 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
         elif not comparable or rank_change is None or volume_change is None:
             state = "INSUFFICIENT_HISTORY"
         else:
-            delta_mentions = sum(value for pair in mention_changes.values() for value in pair.values() if value is not None)
-            state = "RISING" if rank_change > 0 or volume_change > 0 or delta_mentions > 0 else "FADING" if rank_change < 0 or volume_change < 0 or delta_mentions < 0 else "FLAT"
+            rank_direction = 1 if rank_change > 0 else -1 if rank_change < 0 else 0
+            volume_direction = 1 if volume_change >= 5 else -1 if volume_change <= -5 else 0
+            if rank_direction and volume_direction and rank_direction != volume_direction:
+                state = "MIXED"
+            elif rank_direction > 0 or (rank_direction == 0 and volume_direction > 0):
+                state = "RISING"
+            elif rank_direction < 0 or (rank_direction == 0 and volume_direction < 0):
+                state = "FADING"
+            else:
+                state = "FLAT"
         market_change = identity.get("market_change_24h_pct")
         if identity.get("source") == "CACHE":
             market_change = _coin_market_change(coin_id)

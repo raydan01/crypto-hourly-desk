@@ -3,7 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -15,6 +15,19 @@ const EDGE_CANDIDATES = [
 const EDGE = EDGE_CANDIDATES.find(candidate => candidate && fs.existsSync(candidate));
 assert.ok(EDGE, `Microsoft Edge not found at known install paths: ${EDGE_CANDIDATES.join(", ")}`);
 assert.equal(typeof WebSocket, "function", "This script requires Node.js with the built-in WebSocket client");
+
+function stopEdgeProcessesForProfile(profile) {
+  if (process.platform !== "win32") return true;
+  const escapedProfile = profile.replaceAll("'", "''");
+  const script = `$profile = '${escapedProfile}'; Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'msedge.exe' -and $_.CommandLine -like ('*' + $profile + '*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`;
+  try {
+    execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { stdio: "pipe" });
+    return true;
+  } catch (error) {
+    if (/Access denied|0x80041003/i.test(String(error.stderr || error.message))) return false;
+    throw error;
+  }
+}
 
 async function freePort() {
   const server = net.createServer();
@@ -32,6 +45,13 @@ const uiFixtureData = JSON.parse(fs.readFileSync(path.join(ROOT, "tests", "fixtu
 uiFixtureData.captured_at_utc = new Date().toISOString();
 uiFixtureData.source_health.reddit = { status: "DEGRADED", error_class: "RATE_LIMITED" };
 const recordedLiveFixture = fs.readFileSync(path.join(ROOT, "tests", "fixtures", "recorded", "live-collector-output-f494d74.json"));
+const secondRecordedLiveData = JSON.parse(fs.readFileSync(path.join(ROOT, "tests", "fixtures", "recorded", "live-collector-output-5f40129-second-capture.json"), "utf8"));
+const secondRecordedLiveFixture = Buffer.from(JSON.stringify(secondRecordedLiveData));
+const strkDedupeData = structuredClone(secondRecordedLiveData);
+const strkDedupeItem = strkDedupeData.items.find(item => item.symbol.toUpperCase() === "STRK");
+const strkOriginalFlags = strkDedupeItem.fomo_watch.observations.filter(row => row.kind !== "SELLING_PRESSURE");
+strkDedupeItem.fomo_watch.observations.push(...strkOriginalFlags.flatMap(row => Array.from({ length: 2 }, () => ({...row}))));
+const strkDedupeFixture = Buffer.from(JSON.stringify(strkDedupeData));
 const dexCases = [
   ["failed", "FAILED", "HTTPError", "DEX Screener lookup failed (HTTPError); pairs unknown"],
   ["empty", "FRESH", null, "No DEX pairs found for this address"],
@@ -71,7 +91,7 @@ const server = http.createServer((request, response) => {
   if (pathname === "/data/social-context-v2-latest.json") {
     if (scenario === "hype-missing") { response.writeHead(404).end("missing Hype fixture"); return; }
     response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-    response.end(scenario === "live-ui" ? recordedLiveFixture : scenario === "identity-failure" ? identityFailureFixture : uiFixture);
+    response.end(scenario === "live-ui" ? recordedLiveFixture : scenario === "live-ui-second" ? secondRecordedLiveFixture : scenario === "live-ui-strk-dedupe" ? strkDedupeFixture : scenario === "identity-failure" ? identityFailureFixture : uiFixture);
     return;
   }
   if (scenario === "trading-hangs" && pathname === "/data/market-opportunities-hourly-latest.json") return;
@@ -133,15 +153,21 @@ const debugPort = await freePort();
 const tempRoot = path.join(ROOT, ".test-tmp");
 fs.mkdirSync(tempRoot, { recursive: true });
 const profile = fs.mkdtempSync(path.join(tempRoot, "market-attention-edge-"));
-const edge = spawn(EDGE, [
+const edgeArgs = [
   "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-extensions", "--no-first-run", "--no-default-browser-check",
   "--no-proxy-server", "--remote-allow-origins=*", `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
   "about:blank",
-], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+];
+const simulateLauncherHandoff = process.platform === "win32" && process.env.CDP_TEST_LAUNCHER_HANDOFF === "1";
+const edge = simulateLauncherHandoff
+  ? spawn("cmd.exe", ["/d", "/c", "start", "", EDGE, ...edgeArgs], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true })
+  : spawn(EDGE, edgeArgs, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
 let edgeStderr = "";
 edge.stderr.setEncoding("utf8").on("data", chunk => { edgeStderr += chunk; });
 let ws;
 let shutdownBrowser;
+let runError = null;
+const cleanupErrors = [];
 try {
   let version;
   const deadline = Date.now() + 15000;
@@ -150,10 +176,10 @@ try {
       const response = await fetch(`http://127.0.0.1:${debugPort}/json/version`);
       if (response.ok) { version = await response.json(); break; }
     } catch {}
-    if (edge.exitCode !== null) throw new Error(`Edge exited early: ${edgeStderr}`);
     await new Promise(resolve => setTimeout(resolve, 100));
   }
-  assert.ok(version, `Edge CDP did not start: ${edgeStderr}`);
+  assert.ok(version, `Edge CDP did not start within 15 s (launcher exit code ${edge.exitCode}, stderr: ${edgeStderr})`);
+  const launcherExitedBeforeCdp = edge.exitCode !== null;
   const exceptions = [];
   let nextId = 0;
   let pageNextId = 0;
@@ -189,7 +215,7 @@ try {
     });
   }
   send = await connectDebugger(version.webSocketDebuggerUrl);
-  shutdownBrowser = () => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ id: 999999, method: "Browser.close" })); };
+  shutdownBrowser = () => send("Browser.close");
   const { targetId } = await send("Target.createTarget", { url: `http://127.0.0.1:${sitePort}/index.html?testScenario=trading-failure` });
   const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: false });
   await send("Target.activateTarget", { targetId });
@@ -436,15 +462,74 @@ try {
   assert.match(penguCard.summary, /1 FOMO flags/, JSON.stringify(penguCard));
   assert.equal(penguCard.pressureCount, 1, JSON.stringify(penguCard));
   assert.equal(penguCard.flagCount, 1, JSON.stringify(penguCard));
+  await pageSend("Page.navigate", { url: `http://127.0.0.1:${sitePort}/index.html?testScenario=live-ui-second` });
+  const secondCaptureDeadline = Date.now() + 10000;
+  let secondCaptureUi;
+  while (Date.now() < secondCaptureDeadline) {
+    secondCaptureUi = await evaluate(`({cards: document.querySelectorAll("#social-items .hype-card").length, status: document.querySelector("#social-status")?.textContent})`);
+    if (secondCaptureUi.cards === 15) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.equal(secondCaptureUi.cards, 15, JSON.stringify(secondCaptureUi));
+  const secondMomentum = await evaluate(`(() => { const cards = [...document.querySelectorAll("#social-items .hype-card")]; const out = {}; for (const symbol of ["CRAWLER", "QTC", "BUNKER", "IMD6900"]) { const card = cards.find(value => value.querySelector("summary").innerText.includes(symbol)); card.open = true; out[symbol] = card.querySelector(".card-history").innerText; } return out; })()`);
+  assert.match(secondMomentum.CRAWLER, /RISING/i, JSON.stringify(secondMomentum));
+  assert.match(secondMomentum.QTC, /Rank #10 \(was #7\).*volume \+5\.5%.*mixed/i, JSON.stringify(secondMomentum));
+  assert.match(secondMomentum.BUNKER, /Rank #4 \(was #3\).*volume \+13\.1%.*mixed/i, JSON.stringify(secondMomentum));
+  assert.match(secondMomentum.IMD6900, /FADING/i, JSON.stringify(secondMomentum));
+  await pageSend("Page.navigate", { url: `http://127.0.0.1:${sitePort}/index.html?testScenario=live-ui-strk-dedupe` });
+  const strkDeadline = Date.now() + 10000;
+  let strkReady;
+  while (Date.now() < strkDeadline) {
+    strkReady = await evaluate(`({cards: document.querySelectorAll("#social-items .hype-card").length})`);
+    if (strkReady.cards === 15) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const strkFlags = await evaluate(`(() => { const card = [...document.querySelectorAll("#social-items .hype-card")].find(value => value.querySelector("summary").innerText.includes("STRK")); card.open = true; const flags = [...card.querySelectorAll(".fomo-flag")].map(row => row.innerText); return {flags, pressures: card.querySelectorAll(".selling-pressure").length, summary: card.querySelector("summary").innerText, picker: card.querySelector(".pair-chain")?.value, flagCount: card.querySelectorAll(".fomo-flag").length}; })()`);
+  assert.equal(strkFlags.flagCount, 1, JSON.stringify(strkFlags));
+  assert.ok(strkFlags.flagCount <= 5, JSON.stringify(strkFlags));
+  assert.ok(strkFlags.flags.every(line => /pair .*0x06b3bf476b472ee9892ed93a668fa9ca64b85f2b2521e28fc00fb28612be0ead/i.test(line)), JSON.stringify(strkFlags));
+  const strkAfterChainSelection = await evaluate(`(() => { const card = [...document.querySelectorAll("#social-items .hype-card")].find(value => value.querySelector("summary").innerText.includes("STRK")); const picker = card.querySelector(".pair-chain"); picker.value = "solana"; picker.dispatchEvent(new Event("change", {bubbles: true})); return {flags: [...card.querySelectorAll(".fomo-flag")].map(row => row.innerText), pairs: card.querySelector(".pair-results").innerText}; })()`);
+  assert.deepEqual(strkAfterChainSelection.flags, strkFlags.flags, JSON.stringify(strkAfterChainSelection));
+  assert.match(strkAfterChainSelection.pairs, /meteora|raydium/i, JSON.stringify(strkAfterChainSelection));
   assert.deepEqual(exceptions, []);
-  console.log(JSON.stringify({ browser: "Microsoft Edge headless CDP", viewport: "375x812 final acceptance", initial, quickFailure, hanging, failedHourlyArtifactRequests, tradingFailureState, expanded, dexStatusChecks, trading, reverse, reverseTrading, deepPartial, quickColdStart, deepColdStart, liveUi, firstRow, crawlerCard, penguCard, failedDailyArtifactRequests, successfulTradingArtifactLoads, screenshots: [".proof/r10-hype-list.png", ".proof/r10-crawler-expanded.png", ".proof/r10-pengu-expanded.png"], exceptions }, null, 2));
+  console.log(JSON.stringify({ browser: "Microsoft Edge headless CDP", launchMode: simulateLauncherHandoff ? "simulated launcher handoff" : "direct Edge launch", launcherExitedBeforeCdp, viewport: "375x812 final acceptance", initial, quickFailure, hanging, failedHourlyArtifactRequests, tradingFailureState, expanded, dexStatusChecks, trading, reverse, reverseTrading, deepPartial, quickColdStart, deepColdStart, liveUi, firstRow, crawlerCard, penguCard, secondMomentum, strkFlags, strkAfterChainSelection, failedDailyArtifactRequests, successfulTradingArtifactLoads, screenshots: [".proof/r10-hype-list.png", ".proof/r10-crawler-expanded.png", ".proof/r10-pengu-expanded.png"], exceptions }, null, 2));
+} catch (error) {
+  runError = error;
 } finally {
-  try { shutdownBrowser?.(); } catch {}
-  try { ws?.close(); } catch {}
-  if (edge.exitCode === null) await Promise.race([new Promise(resolve => edge.once("exit", resolve)), new Promise(resolve => setTimeout(resolve, 2500))]);
-  if (edge.exitCode === null) edge.kill();
-  if (edge.exitCode === null) await new Promise(resolve => edge.once("exit", resolve));
-  await new Promise(resolve => server.close(resolve));
-  fs.rmSync(profile, { recursive: true, force: true });
-  try { fs.rmdirSync(tempRoot); } catch (error) { if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY") throw error; }
+  const cleanup = async (label, action) => {
+    try { await action(); } catch (error) { cleanupErrors.push(new Error(`${label}: ${error.stack || error}`)); }
+  };
+  await cleanup("Browser.close", async () => { if (shutdownBrowser) await shutdownBrowser(); });
+  await cleanup("WebSocket close", async () => { if (ws && ws.readyState !== WebSocket.CLOSED) ws.close(); });
+  await cleanup("Edge process cleanup", async () => {
+    const processListingAvailable = stopEdgeProcessesForProfile(profile);
+    if (!processListingAvailable) console.log("Edge cleanup: process listing is denied in this sandbox; Browser.close and the run-owned launcher handle the remaining cleanup.");
+    if (!processListingAvailable && edge.exitCode === null) {
+      edge.kill();
+      await new Promise((resolve, reject) => { edge.once("exit", resolve); edge.once("error", reject); });
+    }
+    if (processListingAvailable && edge.exitCode === null) await Promise.race([new Promise(resolve => edge.once("exit", resolve)), new Promise(resolve => setTimeout(resolve, 2500))]);
+    if (process.platform === "win32" && processListingAvailable && edge.exitCode === null) {
+      stopEdgeProcessesForProfile(profile);
+      await Promise.race([new Promise(resolve => edge.once("exit", resolve)), new Promise(resolve => setTimeout(resolve, 1000))]);
+    }
+    if (processListingAvailable && edge.exitCode === null) throw new Error("run-owned Edge launcher did not exit after Browser.close and profile-scoped cleanup");
+    await new Promise(resolve => setTimeout(resolve, 100));
+    try {
+      const response = await fetch(`http://127.0.0.1:${debugPort}/json/version`, { signal: AbortSignal.timeout(500) });
+      if (response.ok) throw new Error("CDP endpoint still responds after Browser.close and profile cleanup");
+    } catch (error) {
+      if (error.message === "CDP endpoint still responds after Browser.close and profile cleanup") throw error;
+    }
+  });
+  await cleanup("HTTP server close", async () => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  await cleanup("Profile removal", async () => fs.rmSync(profile, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 }));
+  await cleanup("Temporary root removal", async () => {
+    try { fs.rmdirSync(tempRoot); } catch (error) { if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY") throw error; }
+  });
 }
+if (runError) console.error(`Browser test failed: ${runError.stack || runError}`);
+for (const error of cleanupErrors) console.error(`Browser test cleanup failed: ${error.stack || error}`);
+if (runError && cleanupErrors.length) throw new AggregateError([runError, ...cleanupErrors], "Browser test and cleanup both failed");
+if (runError) throw runError;
+if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "Browser test cleanup failed");

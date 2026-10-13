@@ -194,7 +194,7 @@ function renderHype(social) {
   };
   const compactMoney = value => value == null ? "unknown" : `$${Number(value).toLocaleString(undefined, {notation: "compact", maximumFractionDigits: 1})}`;
   const compactAge = seconds => seconds == null || !Number.isFinite(Number(seconds)) ? "unknown" : Number(seconds) < 3600 ? `${Math.floor(Number(seconds) / 60)}m` : `${Math.floor(Number(seconds) / 3600)}h`;
-  const primaryPair = item => (item.dex_pairs || []).find(pair => pair.is_primary === true) || [...(item.dex_pairs || [])].filter(pair => pair.liquidity_usd != null).sort((a, b) => Number(b.liquidity_usd) - Number(a.liquidity_usd))[0] || (item.dex_pairs || [])[0] || null;
+  const primaryPair = item => [...(item.dex_pairs || [])].filter(pair => pair.liquidity_usd != null).sort((a, b) => Number(b.liquidity_usd) - Number(a.liquidity_usd))[0] || (item.dex_pairs || []).find(pair => pair.is_primary === true) || (item.dex_pairs || [])[0] || null;
   const observationPair = (row, item) => {
     const pairs = item.dex_pairs || [];
     if (row.pair_address) return pairs.find(pair => pair.pair_address === row.pair_address && (!row.dex_id || pair.dex_id === row.dex_id)) || null;
@@ -206,6 +206,7 @@ function renderHype(social) {
   };
   const observationsFor = item => {
     const primary = primaryPair(item);
+    const seenFlagKinds = new Set();
     const rows = (item.fomo_watch?.observations || []).flatMap(row => {
       const pair = observationPair(row, item);
       const pairSpecific = ["PAIR_UNDER_24H", "LIQUIDITY_UNDER_5_PERCENT", "BUY_SELL_IMBALANCE", "SELLING_PRESSURE", "DEX_PRICE_MOVE"].includes(row.kind);
@@ -219,6 +220,10 @@ function renderHype(social) {
         else return [];
       }
       if (pairSpecific && values.kind !== "SELLING_PRESSURE" && pair !== primary) return [];
+      if (values.kind !== "SELLING_PRESSURE") {
+        if (seenFlagKinds.has(values.kind)) return [];
+        seenFlagKinds.add(values.kind);
+      }
       return [{...values, pair}];
     });
     const move = primary?.price_change_by_period?.h24;
@@ -259,14 +264,24 @@ function renderHype(social) {
     const volumeRatio = item.market?.volume_market_cap_ratio;
     const pairAge = primary?.age_seconds != null ? compactAge(primary.age_seconds) : "unknown";
     const chain = item.identity?.contracts?.[0]?.chain || "chain unknown";
-    const rankHistory = trending.previous_rank != null ? `(was #${trending.previous_rank}) | ${String(trending.state || "").replaceAll("_", " ")}` : "first capture, no history yet";
+    const rankHistory = trending.previous_rank != null ? `Rank #${trending.rank ?? "?"} (was #${trending.previous_rank})` : `Rank #${trending.rank ?? "?"} | first capture, no history yet`;
+    const volumeChange = momentum.volume_change_pct;
+    const volumeDirection = volumeChange == null ? "" : volumeChange > 0 ? "↑" : volumeChange < 0 ? "↓" : "→";
+    const rankChange = momentum.rank_change ?? trending.change;
+    let momentumState = momentum.state || trending.state || "unknown";
+    if (rankChange != null && volumeChange != null) {
+      const rankDirection = rankChange > 0 ? 1 : rankChange < 0 ? -1 : 0;
+      const volumeTrend = volumeChange >= 5 ? 1 : volumeChange <= -5 ? -1 : 0;
+      momentumState = rankDirection && volumeTrend && rankDirection !== volumeTrend ? "MIXED" : rankDirection > 0 || (rankDirection === 0 && volumeTrend > 0) ? "RISING" : rankDirection < 0 || (rankDirection === 0 && volumeTrend < 0) ? "FADING" : "FLAT";
+    }
+    const momentumSummary = `${rankHistory} | ${volumeDirection} volume ${volumeChange == null ? "unknown" : `${Number(volumeChange) > 0 ? "+" : ""}${Number(volumeChange).toFixed(1)}%`} | ${String(momentumState).replaceAll("_", " ").toLowerCase()}`;
     const fomoCount = observationRows.filter(row => row.kind !== "SELLING_PRESSURE").length;
     const newsCount = count(item.mentions?.google_news, "24h");
     const redditAvailable = item.mentions?.reddit?.status === "FRESH";
     const capturedAt = item.observed_at_utc || social.captured_at_utc;
     const capturedLabel = capturedAt ? new Date(capturedAt).toLocaleString() : "capture time unknown";
     const coinChange = item.market?.change_24h_pct == null || !item.market?.change_24h_source ? "unknown" : `${Number(item.market.change_24h_pct) > 0 ? "+" : ""}${Number(item.market.change_24h_pct).toLocaleString()}%`;
-    return `<details class="hype-card"><summary><span class="summary-lines"><strong>${escapeHtml(item.name)} <small>${escapeHtml(item.symbol)}</small> <em class="chain-badge">${escapeHtml(chain)}</em> <small class="trend-rank">Trending #${trending.rank ?? "?"}</small></strong><span>24h ${move} (${change != null ? escapeHtml(primary?.dex_id || "DEX") : item.market?.change_24h_source ? "CoinGecko" : "source unknown"}) | Vol ${volumeRatio == null ? "unknown" : `${Number(volumeRatio).toFixed(1)}x`} mcap | pair ${pairAge} old</span><span>${fomoCount} FOMO flags | About this coin: ${newsCount} news / 24h${redditAvailable ? ` | ${count(item.mentions.reddit, "24h")} Reddit / 24h` : ""}</span></span></summary><div class="hype-body"><p class="card-history">Trending #${trending.rank ?? "?"} | ${escapeHtml(rankHistory)} | captured ${escapeHtml(capturedLabel)}</p><div class="metrics"><div class="metric"><span>CoinGecko price</span><strong>${money(item.market?.price_usd)}</strong></div><div class="metric"><span>Market cap</span><strong>${money(item.market?.market_cap_usd)}</strong></div><div class="metric"><span>24h volume</span><strong>${money(item.market?.volume_24h_usd)}</strong></div><div class="metric"><span>Volume / market cap | 24h</span><strong>${volumeRatio == null ? "unknown" : `${(volumeRatio * 100).toFixed(2)}%`}</strong></div><div class="metric"><span>CoinGecko 24h change</span><strong>${coinChange}</strong></div><div class="metric"><span>DEX primary pair 24h change (${escapeHtml(primary?.dex_id || "unknown source")})</span><strong>${change == null ? "unknown" : `${Number(change) > 0 ? "+" : ""}${Number(change).toLocaleString()}%`}</strong></div><div class="metric"><span>Volume change vs prior capture</span><strong>${momentum.volume_change_pct == null ? "insufficient history" : `${momentum.volume_change_pct.toFixed(2)}%`}</strong></div></div><h3>Chain and contract</h3>${identity(item)}<h3>Recent About this coin headlines</h3>${headlineTop.length ? `<ul class="headlines">${headlineTop.map(row => `<li><a href="${escapeHtml(row.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(row.title)}</a><span>${ageAt(row.published_at_utc)}</span></li>`).join("")}</ul>` : `<p class="muted">No dated, relevant headline links.</p>`}<div class="mention-grid">${mention(item.mentions?.google_news, "Google News", item.name)}${mention(item.mentions?.reddit, "Reddit sitewide", item.name)}</div><h3>Address matched DEX pairs</h3>${pairContent}<h3>FOMO watch | observations only</h3><p class="muted">${escapeHtml(fomo.disclaimer || "Unknown data stays unknown; observations do not affect score or direction.")}</p>${observations ? `<ul class="fomo-observations">${observations}</ul>` : `<p class="muted">${escapeHtml(fomo.status || "UNKNOWN").replaceAll("_", " ")}; no observation recorded.</p>`}</div></details>`;
+    return `<details class="hype-card"><summary><span class="summary-lines"><strong>${escapeHtml(item.name)} <small>${escapeHtml(item.symbol)}</small> <em class="chain-badge">${escapeHtml(chain)}</em> <small class="trend-rank">Trending #${trending.rank ?? "?"}</small></strong><span>24h ${move} (${change != null ? escapeHtml(primary?.dex_id || "DEX") : item.market?.change_24h_source ? "CoinGecko" : "source unknown"}) | Vol ${volumeRatio == null ? "unknown" : `${Number(volumeRatio).toFixed(1)}x`} mcap | pair ${pairAge} old</span><span>${fomoCount} FOMO flags | About this coin: ${newsCount} news / 24h${redditAvailable ? ` | ${count(item.mentions.reddit, "24h")} Reddit / 24h` : ""}</span></span></summary><div class="hype-body"><p class="card-history">${escapeHtml(momentumSummary)} | captured ${escapeHtml(capturedLabel)}</p><div class="metrics"><div class="metric"><span>CoinGecko price</span><strong>${money(item.market?.price_usd)}</strong></div><div class="metric"><span>Market cap</span><strong>${money(item.market?.market_cap_usd)}</strong></div><div class="metric"><span>24h volume</span><strong>${money(item.market?.volume_24h_usd)}</strong></div><div class="metric"><span>Volume / market cap | 24h</span><strong>${volumeRatio == null ? "unknown" : `${(volumeRatio * 100).toFixed(2)}%`}</strong></div><div class="metric"><span>CoinGecko 24h change</span><strong>${coinChange}</strong></div><div class="metric"><span>DEX primary pair 24h change (${escapeHtml(primary?.dex_id || "unknown source")})</span><strong>${change == null ? "unknown" : `${Number(change) > 0 ? "+" : ""}${Number(change).toLocaleString()}%`}</strong></div><div class="metric"><span>Volume change vs prior capture</span><strong>${momentum.volume_change_pct == null ? "insufficient history" : `${momentum.volume_change_pct.toFixed(2)}%`}</strong></div></div><h3>Chain and contract</h3>${identity(item)}<h3>Recent About this coin headlines</h3>${headlineTop.length ? `<ul class="headlines">${headlineTop.map(row => `<li><a href="${escapeHtml(row.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(row.title)}</a><span>${ageAt(row.published_at_utc)}</span></li>`).join("")}</ul>` : `<p class="muted">No dated, relevant headline links.</p>`}<div class="mention-grid">${mention(item.mentions?.google_news, "Google News", item.name)}${mention(item.mentions?.reddit, "Reddit sitewide", item.name)}</div><h3>Address matched DEX pairs</h3>${pairContent}<h3>FOMO watch | observations only</h3><p class="muted">${escapeHtml(fomo.disclaimer || "Unknown data stays unknown; observations do not affect score or direction.")}</p>${observations ? `<ul class="fomo-observations">${observations}</ul>` : `<p class="muted">${escapeHtml(fomo.status || "UNKNOWN").replaceAll("_", " ")}; no observation recorded.</p>`}</div></details>`;
   }).join("") : `<p class="muted">Social sources are unavailable or still refreshing.</p>`;
   document.querySelectorAll(".copy-address").forEach(button => button.addEventListener("click", async () => { try { await navigator.clipboard.writeText(button.dataset.address); button.textContent = "Copied"; } catch { button.textContent = "Copy unavailable"; } }));
   document.querySelectorAll(".pair-chain").forEach(select => select.addEventListener("change", () => {
