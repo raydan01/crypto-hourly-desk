@@ -28,7 +28,31 @@ function mime(file) {
   return ({ ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".svg": "image/svg+xml" })[path.extname(file)] || "application/octet-stream";
 }
 
-const uiFixture = fs.readFileSync(path.join(ROOT, "tests", "fixtures", "social-context-v2-ui.json"));
+const uiFixtureData = JSON.parse(fs.readFileSync(path.join(ROOT, "tests", "fixtures", "social-context-v2-ui.json"), "utf8"));
+const dexCases = [
+  ["failed", "FAILED", "HTTPError", "DEX Screener lookup failed (HTTPError); pairs unknown"],
+  ["empty", "FRESH", null, "No DEX pairs found for this address"],
+  ["unsupported", "UNSUPPORTED", null, "DEX lookup not supported for this chain"],
+  ["not-queried", "NOT_QUERIED", null, "DEX not checked this capture"],
+];
+for (const [id, status, errorClass] of dexCases) {
+  const item = structuredClone(uiFixtureData.items[0]);
+  item.coingecko_id = id;
+  item.name = id;
+  item.dex_pairs = [];
+  item.identity.contracts = [{ ...item.identity.contracts[0], dex_status: status, dex_error_class: errorClass }];
+  uiFixtureData.items.push(item);
+}
+const pudgy = structuredClone(uiFixtureData.items[0]);
+pudgy.coingecko_id = "pudgy-penguins";
+pudgy.name = "Pudgy Penguins";
+pudgy.dex_pairs = [];
+pudgy.identity.contracts = [
+  { chain: "abstract", address: "0x1111111111111111111111111111111111111111", dex_status: "UNSUPPORTED" },
+  { chain: "ethereum", address: "0x2222222222222222222222222222222222222222", dex_status: "FRESH" },
+];
+uiFixtureData.items.push(pudgy);
+const uiFixture = Buffer.from(JSON.stringify(uiFixtureData));
 const server = http.createServer((request, response) => {
   const pathname = decodeURIComponent(new URL(request.url, "http://127.0.0.1").pathname);
   if (pathname === "/") { response.writeHead(302, { location: "/index.html" }).end(); return; }
@@ -136,21 +160,39 @@ try {
     if (initial.cards > 0) break;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
-  assert.equal(initial.cards, 1, JSON.stringify(initial));
+  assert.equal(initial.cards, 6, JSON.stringify(initial));
   assert.ok(initial.width <= 390, JSON.stringify(initial));
   await evaluate(`document.querySelector("#social-items .hype-card").open = true`);
-  const expanded = await evaluate(`({width: document.documentElement.scrollWidth, headlines: document.querySelectorAll("#social-items .headlines a").length, pairs: document.querySelectorAll("#social-items .pair-row").length, reddit: document.querySelector("#social-items").innerText.includes("Reddit unavailable (rate-limited)"), contract: document.querySelector("#social-items .contract-list code")?.textContent})`);
+  const expanded = await evaluate(`({width: document.documentElement.scrollWidth, headlines: document.querySelectorAll("#social-items .hype-card:first-child .headlines a").length, pairs: document.querySelectorAll("#social-items .pair-row").length, reddit: document.querySelector("#social-items").innerText.includes("Reddit unavailable (rate-limited)"), contract: document.querySelector("#social-items .contract-list code")?.textContent})`);
   assert.ok(expanded.width <= 390, JSON.stringify(expanded));
   assert.equal(expanded.headlines, 1, JSON.stringify(expanded));
   assert.equal(expanded.pairs, 2, JSON.stringify(expanded));
   assert.equal(expanded.reddit, true, JSON.stringify(expanded));
   assert.equal(expanded.contract, "CQCDTp8rsFV3PhaPeYjcCW5LdGTxi6jFx7eC3UXnpump");
+  const dexStatusChecks = await evaluate(`(() => {
+    const cards = [...document.querySelectorAll("#social-items .hype-card")];
+    const results = {};
+    for (const card of cards.slice(1, 5)) {
+      card.open = true;
+      results[card.querySelector("summary strong").textContent.trim().split(" ")[0]] = card.querySelector(".hype-body").innerText;
+    }
+    const pudgy = cards[5];
+    pudgy.open = true;
+    const picker = pudgy.querySelector(".pair-chain");
+    picker.value = "ethereum";
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+    results.pudgyEthereum = pudgy.querySelector(".pair-results").innerText;
+    return results;
+  })()`);
+  for (const [id, , , expected] of dexCases) assert.ok(dexStatusChecks[id].includes(expected), JSON.stringify(dexStatusChecks));
+  assert.ok(dexStatusChecks.pudgyEthereum.includes("No DEX pairs found for this address"), JSON.stringify(dexStatusChecks));
+  assert.ok(!dexStatusChecks.pudgyEthereum.includes("not supported"), JSON.stringify(dexStatusChecks));
   await evaluate(`document.querySelector('[data-view="trading-view"]').click()`);
   const trading = await evaluate(`({active: document.querySelector("#trading-view")?.hidden === false, width: document.documentElement.scrollWidth})`);
   assert.equal(trading.active, true, JSON.stringify(trading));
   assert.ok(trading.width <= 390, JSON.stringify(trading));
   assert.deepEqual(exceptions, []);
-  console.log(JSON.stringify({ browser: "Microsoft Edge headless CDP", viewport: "390x844", initial, expanded, trading, exceptions }, null, 2));
+  console.log(JSON.stringify({ browser: "Microsoft Edge headless CDP", viewport: "390x844", initial, expanded, dexStatusChecks, trading, exceptions }, null, 2));
 } finally {
   try { shutdownBrowser?.(); } catch {}
   try { ws?.close(); } catch {}

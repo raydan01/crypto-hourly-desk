@@ -366,6 +366,10 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
         prior_time = _timestamp(previous.get("captured_at_utc")) if previous else None
         comparable = bool(prior_time and prior_time < captured_at and old and isinstance(old.get("trending", {}).get("rank"), int) and isinstance(old_volume, (int, float)) and old_volume > 0 and isinstance(volume, (int, float)))
         comparison = _iso(prior_time) if comparable else None
+        if not comparable:
+            rank_change = None
+            volume_change = None
+            mention_changes = {source: {window: None for window in ("24h", "7d")} for source in ("google_news", "reddit")}
         if not old:
             state = "NEW_SINCE_PRIOR_CAPTURE" if previous else "INSUFFICIENT_HISTORY"
         elif not comparable or rank_change is None or volume_change is None:
@@ -386,7 +390,7 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
             if isinstance(buys, (int, float)) and isinstance(sells, (int, float)) and min(buys, sells) >= 0 and max(buys, sells) >= 20 and max(buys, sells) >= 1.5 * max(1, min(buys, sells)): observations.append({"kind": "BUY_SELL_IMBALANCE", "source": "DEX Screener 24h transactions", "age_seconds": pair.get("age_seconds"), "buys_24h": buys, "sells_24h": sells})
         if isinstance(volume, (int, float)) and isinstance(market_cap, (int, float)) and volume > market_cap: observations.append({"kind": "VOLUME_ABOVE_MARKET_CAP", "source": "CoinGecko 24h volume and market cap", "age_seconds": 0, "volume_24h_usd": volume, "market_cap_usd": market_cap})
         if isinstance(change, (int, float)) and change > 100: observations.append({"kind": "PRICE_MOVE_ABOVE_100_PERCENT", "source": "CoinGecko rolling 24h trending snapshot", "age_seconds": 0, "change_24h_pct": change})
-        items.append({"coingecko_id": coin_id, "name": name, "symbol": symbol, "observed_at_utc": _iso(captured_at), "trending": {"rank": rank, "previous_rank": old.get("trending", {}).get("rank"), "change": rank_change, "state": state, "window": "rolling 24h"}, "market": market, "identity": identity, "mentions": {"google_news": news, "reddit": reddit}, "dex_pairs": dex_pairs, "momentum": {"rank_change": rank_change, "volume_change_pct": volume_change, "mention_change_by_source": mention_changes, "comparison_at_utc": comparison, "state": state}, "fomo_watch": {"status": "WATCH_ONLY" if observations else "NO_OBSERVATION" if dex_pairs else "UNKNOWN", "observations": observations, "disclaimer": "Descriptive observations only; no score, direction, or trade gate."}})
+        items.append({"coingecko_id": coin_id, "name": name, "symbol": symbol, "observed_at_utc": _iso(captured_at), "trending": {"rank": rank, "previous_rank": old.get("trending", {}).get("rank") if comparable else None, "change": rank_change, "state": state, "window": "rolling 24h"}, "market": market, "identity": identity, "mentions": {"google_news": news, "reddit": reddit}, "dex_pairs": dex_pairs, "momentum": {"rank_change": rank_change, "volume_change_pct": volume_change, "mention_change_by_source": mention_changes, "comparison_at_utc": comparison, "state": state}, "fomo_watch": {"status": "WATCH_ONLY" if observations else "NO_OBSERVATION" if dex_pairs else "UNKNOWN", "observations": observations, "disclaimer": "Descriptive observations only; no score, direction, or trade gate."}})
     for source in ("google_news", "reddit"):
         vals = [item["mentions"][source] for item in items if item["mentions"][source]["status"] != "NOT_QUERIED"]
         failed = sum(value["status"] != "FRESH" for value in vals)
