@@ -15,7 +15,7 @@ ROOT = Path(__file__).parent
 sys.path.append(str(ROOT.parent))
 from research.market_opportunities import build_opportunity_payload, realized_volatility
 from research.market_scanner import scan_markets
-from social_context import build_social_context
+from social_context import build_social_context, write_social_context
 
 OUTPUT = ROOT / "data" / "market-opportunities-hourly-latest.json"
 WATCHLIST = ROOT / "data" / "watchlist.json"
@@ -121,7 +121,7 @@ def build_snapshot(cadence: str = "hourly", social_context: dict | None = None) 
             "bias": "AVOID",
             "opportunity_score": 0,
             "confidence_band": "LOW",
-            "score_breakdown": {"score": 0, "band": "LOW", "bias": "AVOID", "market_score": 0, "social_score": 0, "market_direction": 0, "social_direction": 0, "combined_direction": 0, "social_sources": []},
+            "score_breakdown": {"score": 0, "band": "LOW", "bias": "AVOID", "market_score": 0, "market_direction": 0},
             "timeframe": schedule_timeframe,
             "pair_key": source.get("pair_key"),
             "metrics": {"last": source.get("last"), "bid": source.get("bid"), "ask": source.get("ask"), "change_24h_pct": source.get("change_24h_pct"), "spread_bps": rejection.get("metrics", {}).get("spread_bps"), "volume_24h_quote": source.get("volume_24h_quote"), "volatility_24h": source.get("volatility_24h")},
@@ -156,4 +156,6 @@ def build_snapshot(cadence: str = "hourly", social_context: dict | None = None) 
 
 if __name__ == "__main__":
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text(json.dumps(build_snapshot(), sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    payload = build_snapshot()
+    write_social_context(payload["social_context"])
+    OUTPUT.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
