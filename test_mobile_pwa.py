@@ -15,7 +15,6 @@ from research.market_opportunities import score_candidate
 
 FIXTURES = ROOT / "tests" / "fixtures"
 NOW = datetime(2026, 10, 13, 7, 0, tzinfo=timezone.utc)
-RECORDED = ROOT.parent / "inputs" / "recorded-live-2026-10-12"
 
 
 def save_proof(name: str, value) -> None:

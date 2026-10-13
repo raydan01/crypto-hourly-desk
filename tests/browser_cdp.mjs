@@ -94,6 +94,10 @@ const server = http.createServer((request, response) => {
     response.writeHead(404).end("missing daily fixture from cold start");
     return;
   }
+  if (scenario === "cold-start-active-quick" && pathname === "/data/market-opportunities-hourly-latest.json") {
+    response.writeHead(404).end("missing active hourly fixture from cold start");
+    return;
+  }
   const target = path.resolve(ROOT, `.${pathname}`);
   if (target !== ROOT && !target.startsWith(ROOT + path.sep)) {
     response.writeHead(403).end("forbidden");
@@ -124,7 +128,9 @@ const server = http.createServer((request, response) => {
 await new Promise((resolve, reject) => server.listen(0, "127.0.0.1", resolve).once("error", reject));
 const sitePort = server.address().port;
 const debugPort = await freePort();
-const profile = fs.mkdtempSync(path.join(ROOT, ".test-tmp", "market-attention-edge-"));
+const tempRoot = path.join(ROOT, ".test-tmp");
+fs.mkdirSync(tempRoot, { recursive: true });
+const profile = fs.mkdtempSync(path.join(tempRoot, "market-attention-edge-"));
 const edge = spawn(EDGE, [
   "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-extensions", "--no-first-run", "--no-default-browser-check",
   "--no-proxy-server", "--remote-allow-origins=*", `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
@@ -345,6 +351,16 @@ try {
   }
   assert.match(quickColdStart.summary, /schedule artifacts refreshed \(2\/3\)/i, JSON.stringify(quickColdStart));
   assert.ok(quickColdStart.summary.includes("WEEKLY TRADING no prior capture"), JSON.stringify(quickColdStart));
+  await pageSend("Page.navigate", { url: `http://127.0.0.1:${sitePort}/index.html?testScenario=cold-start-active-quick` });
+  const activeQuickDeadline = Date.now() + 15000;
+  let activeQuick;
+  while (Date.now() < activeQuickDeadline) {
+    activeQuick = await evaluate(`({status: document.querySelector("#scan-status")?.textContent, summary: document.querySelector("#scan-summary")?.textContent})`);
+    if (/schedule artifacts refreshed \(2\/3\)/i.test(activeQuick.summary)) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.match(activeQuick.summary, /schedule artifacts refreshed \(2\/3\)/i, JSON.stringify(activeQuick));
+  assert.ok(activeQuick.summary.includes("DAY TRADING no prior capture"), JSON.stringify(activeQuick));
   await pageSend("Page.navigate", { url: `http://127.0.0.1:${sitePort}/index.html?testScenario=cold-start-deep` });
   const coldDeepReadyDeadline = Date.now() + 10000;
   while (Date.now() < coldDeepReadyDeadline && await evaluate(`document.querySelector("#refresh-button")?.disabled`)) await new Promise(resolve => setTimeout(resolve, 50));
@@ -369,4 +385,5 @@ try {
   if (edge.exitCode === null) await new Promise(resolve => edge.once("exit", resolve));
   await new Promise(resolve => server.close(resolve));
   fs.rmSync(profile, { recursive: true, force: true });
+  try { fs.rmdirSync(tempRoot); } catch (error) { if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY") throw error; }
 }

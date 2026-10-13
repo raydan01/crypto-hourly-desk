@@ -592,8 +592,8 @@ async function boot({manual = false} = {}) {
     if (manual && previousTimestamp && previousTimestamp === snapshot.generated_at_utc) $("#scan-status").textContent = `LIVE ${modeConfig[activeMode].title}`;
   } catch (error) {
     snapshot = snapshotsByMode[activeMode] || null;
-    const artifacts = Object.values(snapshotsByMode).filter(item => item.artifact_refresh_status !== "FAILED").length;
-    const artifactDetail = refreshFailures.length ? ` Schedule artifacts refreshed (${artifacts}/${Object.keys(modeConfig).length}): ${refreshFailures.join(" | ")}.` : "";
+    const artifactReport = artifactRefreshReport();
+    const artifactDetail = artifactReport.failures.length ? ` Schedule artifacts refreshed (${artifactReport.fresh}/${artifactReport.total}): ${artifactReport.failures.join("; ")}.` : "";
     renderDataStale(`Full refresh failed after retries: ${String(error.message || error).replace(/[.]+$/, "")}.${artifactDetail} Live quote freshness is separate.`);
   } finally { button.disabled = false; button.textContent = "Quick scan"; }
 }

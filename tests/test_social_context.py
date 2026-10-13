@@ -5,8 +5,8 @@ from urllib.parse import parse_qs, urlsplit
 import social_context
 
 
+FIXTURES = Path(__file__).parent / "fixtures" / "recorded"
 FIXTURE = Path(__file__).parent / "fixtures" / "google-news-live-recorded.xml"
-RECORDED = Path(__file__).resolve().parents[2] / "inputs"
 
 
 def test_recorded_google_news_titles_require_asset_and_crypto_context(monkeypatch):
@@ -43,10 +43,10 @@ def test_google_news_body_alone_cannot_match_a_recorded_title():
 
 def test_full_recorded_rss_uses_separate_coin_and_related_buzz_tiers(monkeypatch):
     files = {
-        "Pearl": RECORDED / "recorded-live-2026-10-13" / "google-news-pearl-7d.xml",
-        "Claudia": RECORDED / "recorded-live-2026-10-13" / "google-news-claudia-7d.xml",
-        "Bunker Mode": RECORDED / "recorded-live-2026-10-13" / "google-news-bunker-mode-7d.xml",
-        "Crawlerpad": RECORDED / "recorded-live-2026-10-12" / "google-news-crawlerpad-7d.xml",
+        "Pearl": FIXTURES / "google-news-pearl-7d.xml",
+        "Claudia": FIXTURES / "google-news-claudia-7d.xml",
+        "Bunker Mode": FIXTURES / "google-news-bunker-mode-7d.xml",
+        "Crawlerpad": FIXTURES / "google-news-crawlerpad-7d.xml",
     }
     recorded = {name: path.read_bytes() for name, path in files.items()}
     assert all(len(social_context._rss_items(payload)) > 1 for payload in recorded.values())
@@ -76,13 +76,26 @@ def test_full_recorded_rss_uses_separate_coin_and_related_buzz_tiers(monkeypatch
 
 
 def test_three_recorded_near_headlines_match_coin_tier():
-    output = (RECORDED / "recorded-live-2026-10-13" / "live-collector-output-058b346.json").read_text(encoding="utf-8")
+    output = (FIXTURES / "live-collector-output-058b346.json").read_text(encoding="utf-8")
     import json
     captured = json.loads(output)
     near = next(item for item in captured["items"] if item["coingecko_id"] == "near")
     samples = near["mentions"]["google_news"]["headlines"]
     assert len(samples) == 3
     assert all(social_context._mention_tier(row, "NEAR Protocol", "NEAR") == "coin" for row in samples)
+
+
+def test_test_sources_keep_recorded_paths_inside_repository():
+    repo = Path(__file__).resolve().parents[1]
+    test_sources = [repo / "test_mobile_pwa.py", *sorted((repo / "tests").glob("test_*.py"))]
+    external_root = "ROOT" + ".parent / " + '"' + "inputs" + '"'
+    external_parents = "parents[" + "2] / " + '"' + "inputs" + '"'
+    for source in test_sources:
+        text = source.read_text(encoding="utf-8")
+        assert external_root not in text, source
+        assert external_parents not in text, source
+    for fixture in FIXTURES.glob("*"):
+        assert fixture.resolve().is_relative_to(repo)
 
 
 def test_mention_tier_markers_and_non_coin_context():
