@@ -31,7 +31,7 @@ _CHAIN_EXPLORERS = {
     "polygon-pos": ("https://polygonscan.com/address/", "polygon"),
     "avalanche": ("https://snowtrace.io/address/", "avalanche"),
     "optimistic-ethereum": ("https://optimistic.etherscan.io/address/", "optimism"),
-    "robinhood": ("https://explorer.robinhoodchain.com/address/", "robinhood"),
+    "robinhood": ("https://robinhoodchain.blockscout.com/address/", "robinhood"),
 }
 
 
