@@ -42,7 +42,13 @@ function Write-JobLog([string]$Message) {
             Move-Item -LiteralPath $script:LogPath -Destination "$($script:LogPath).1" -Force
         }
     }
-    if ($script:LogPath) { Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8 }
+    if ($script:LogPath) {
+        $writer = New-Object System.IO.StreamWriter($script:LogPath, $true, (New-Object System.Text.UTF8Encoding($false)))
+        try { $writer.WriteLine($line) } finally { $writer.Dispose() }
+    }
+}
+function Write-Utf8NoBom([string]$Path, [string]$Text) {
+    [IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
 }
 function Invoke-Git([string[]]$GitArgs) {
     $result = Invoke-Native -FilePath $script:GitExe -ArgumentList (@('-C', $script:RepoPath) + $GitArgs) -WorkingDirectory $script:RepoPath
@@ -51,7 +57,7 @@ function Invoke-Git([string[]]$GitArgs) {
 }
 function Get-CaptureTime([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Required artifact missing: $([IO.Path]::GetFileName($Path))" }
-    $captureCode = "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8')); print(d.get('captured_at_utc') or d.get('market_data_captured_at_utc') or d.get('generated_at_utc') or '')"
+    $captureCode = "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8-sig')); print(d.get('captured_at_utc') or d.get('market_data_captured_at_utc') or d.get('generated_at_utc') or '')"
     $fieldResult = Invoke-Native -FilePath $script:PythonPath -ArgumentList @('-c', $captureCode, $Path) -WorkingDirectory $script:RepoPath
     $field = $fieldResult.StdOut
     if ($fieldResult.ExitCode -ne 0 -or -not $field) { throw "Artifact has no valid capture field (exit $($fieldResult.ExitCode)): $([IO.Path]::GetFileName($Path))" }
@@ -73,8 +79,8 @@ def stamp(value):
     datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
 def flags(value):
     require(value.get('research_only') is True and value.get('trade_authorization') is False and value.get('execution_allowed') is False, 'research-only safety flags invalid')
-market = json.load(open(sys.argv[1], encoding='utf-8'))
-social = json.load(open(sys.argv[2], encoding='utf-8'))
+market = json.load(open(sys.argv[1], encoding='utf-8-sig'))
+social = json.load(open(sys.argv[2], encoding='utf-8-sig'))
 require(market.get('schema_version') == 'market-opportunities.v1', 'unsupported market artifact schema')
 require(market.get('status') in ('READY', 'DEGRADED'), 'invalid market artifact status')
 flags(market)
@@ -121,7 +127,7 @@ function Assert-AllowedChanges {
 function Save-Status([string]$State, [string]$Detail, [string]$RemoteRef = '') {
     $obj = [ordered]@{ updated_at_utc = [DateTime]::UtcNow.ToString('o'); state = $State; detail = $Detail; remote_ref = $RemoteRef; local_commit = $script:LocalCommit; dry_run = [bool]$DryRun }
     $tmp = "$script:StatusPath.tmp"
-    $obj | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tmp -Encoding UTF8
+    Write-Utf8NoBom $tmp (ConvertTo-Json -InputObject $obj -Depth 4)
     Move-Item -LiteralPath $tmp -Destination $script:StatusPath -Force
 }
 function Get-Head([string]$Ref) { return ((Invoke-Git @('rev-parse', $Ref)) -join '').Trim() }

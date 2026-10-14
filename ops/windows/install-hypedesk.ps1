@@ -62,10 +62,11 @@ if ($TestMode) {
 if ($TestMode) {
     $inventoryPath = Join-Path $resolvedRoot 'state\mock-task-inventory.json'
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $inventoryPath) | Out-Null
-    if (Test-Path -LiteralPath $inventoryPath) { $inventory = @(Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json) } else { $inventory = @() }
+    if (Test-Path -LiteralPath $inventoryPath) { $inventory = @(foreach ($hdItem in (Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json)) { $hdItem }) } else { $inventory = @() }
     $others = @($inventory | Where-Object { $_.TaskName -ne $TaskName })
     $mine = [pscustomobject]@{ TaskName=$TaskName; UserId=[Security.Principal.WindowsIdentity]::GetCurrent().Name; LogonType='Interactive'; Schedule='Hourly'; MultipleInstances='IgnoreNew'; NetworkAvailable=$true; RunLevel='LeastPrivilege'; Action=$runner; LastTaskResult='NotRun'; NextRunTime=[DateTime]::Now.AddMinutes(2).ToString('o') }
-    @($others + $mine) | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $inventoryPath -Encoding UTF8
+    $inventoryJson = ConvertTo-Json -InputObject @($others + $mine) -Depth 5
+    [IO.File]::WriteAllText($inventoryPath, $inventoryJson, (New-Object System.Text.UTF8Encoding($false)))
     $task = $mine
 } else {
     Import-Module ScheduledTasks -ErrorAction Stop

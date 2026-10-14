@@ -16,9 +16,10 @@ if ($TestMode) {
     if (($resolvedRoot -ne $testRoot) -and -not $resolvedRoot.StartsWith($testRoot + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'TestMode root must be under repo/.test-tmp.' }
     $inventoryPath = Join-Path $resolvedRoot 'state\mock-task-inventory.json'
     if (Test-Path -LiteralPath $inventoryPath) {
-        $inventory = @(Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json)
+        $inventory = @(foreach ($hdItem in (Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json)) { $hdItem })
         $remaining = @($inventory | Where-Object { $_.TaskName -ne $TaskName })
-        $remaining | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $inventoryPath -Encoding UTF8
+        $inventoryJson = ConvertTo-Json -InputObject @($remaining) -Depth 5
+        [IO.File]::WriteAllText($inventoryPath, $inventoryJson, (New-Object System.Text.UTF8Encoding($false)))
     }
     'Task removal: MOCKED; unrelated tasks preserved.'
 } else {

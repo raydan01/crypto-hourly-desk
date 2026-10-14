@@ -178,7 +178,7 @@ function renderHype(social, refreshInfo = {}) {
   $("#social-summary").textContent = `${items.length ? `${items.length} trending projects (${captureAgeLabel}; stale after 2h). Counts are matching, dated RSS items. ` : `No Hype data available (${captureAgeLabel}). `}${liveLabel} ${attribution}`;
   $("#social-health").innerHTML = Object.entries(health).map(([name, value]) => { const status = String(value.status || "UNKNOWN").toUpperCase(); const warning = status !== "FRESH"; return `<span class="${warning ? "warning" : "fresh"}">${escapeHtml(name.replaceAll("_", " "))}: <strong>${value.error_class === "RATE_LIMITED" ? "rate-limited" : escapeHtml(value.status || "UNKNOWN")}</strong></span>`; }).join("");
   if (refreshInfo.failure) $("#social-health").innerHTML = `<span class="warning">Live refresh: <strong>${escapeHtml(refreshInfo.failure)}</strong></span>${$("#social-health").innerHTML}`;
-  const formatAge = seconds => seconds == null || !Number.isFinite(seconds) ? "age unknown" : seconds < 3600 ? `${Math.floor(seconds / 60)}m ago` : seconds < 86400 ? `${(seconds / 3600).toFixed(1)}h ago` : `${(seconds / 86400).toFixed(1)}d ago`;
+  const formatAge = seconds => seconds == null || !Number.isFinite(seconds) ? "age unknown" : seconds < 3600 ? `${Math.floor(seconds / 60)}m ago` : seconds < 72 * 3600 ? `${(seconds / 3600).toFixed(1)}h ago` : seconds < 365 * 86400 ? `${Math.floor(seconds / 86400)}d ago` : `${(seconds / (365 * 86400)).toFixed(1)}y ago`;
   const ageAt = timestamp => { const parsed = Date.parse(timestamp || ""); if (!Number.isFinite(parsed)) return "age unknown"; const seconds = (Date.now() - parsed) / 1000; return seconds < -5 ? "age unknown" : formatAge(Math.max(0, seconds)); };
   const newestMentionAt = item => [item.mentions?.google_news?.newest_published_at_utc, item.mentions?.reddit?.newest_published_at_utc].filter(Boolean).sort((left, right) => Date.parse(right) - Date.parse(left))[0] || null;
   const count = (mention, window) => mention?.status === "FRESH" ? String(mention[`coin_count_${window}`] ?? "unknown") : "unknown";
@@ -213,7 +213,7 @@ function renderHype(social, refreshInfo = {}) {
     }).join("")}</div>`;
   };
   const compactMoney = value => value == null ? "unknown" : `$${Number(value).toLocaleString(undefined, {notation: "compact", maximumFractionDigits: 1})}`;
-  const compactAge = seconds => seconds == null || !Number.isFinite(Number(seconds)) ? "unknown" : Number(seconds) < 3600 ? `${Math.floor(Number(seconds) / 60)}m` : `${Math.floor(Number(seconds) / 3600)}h`;
+  const compactAge = seconds => seconds == null || !Number.isFinite(Number(seconds)) ? "unknown" : Number(seconds) < 3600 ? `${Math.floor(Number(seconds) / 60)}m` : Number(seconds) < 72 * 3600 ? `${Math.floor(Number(seconds) / 3600)}h` : Number(seconds) < 365 * 86400 ? `${Math.floor(Number(seconds) / 86400)}d` : `${(Number(seconds) / (365 * 86400)).toFixed(1)}y`;
   const observationLine = (row, item) => {
     const values = row;
     const pair = (item.dex_pairs || []).find(candidate => row.pair_address && candidate.pair_address === row.pair_address && (!row.dex_id || candidate.dex_id === row.dex_id)) || null;

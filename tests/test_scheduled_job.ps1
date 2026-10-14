@@ -18,14 +18,14 @@ $nativeModule = Join-Path $repo 'ops\windows\HypeDesk.Native.psm1'
 Import-Module -Name $nativeModule -Force -ErrorAction Stop
 $python = 'C:\CryptoScope\tools\python-3.14\python.exe'
 function Assert([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
-function Invoke-HdNative([string]$Path, [string[]]$Args, [string]$At, [int]$ExpectedExit = 0) {
-    $result = Invoke-Native -FilePath $Path -ArgumentList $Args -WorkingDirectory $At
+function Invoke-HdNative([string]$Path, [string[]]$NativeArgs, [string]$At, [int]$ExpectedExit = 0) {
+    $result = Invoke-Native -FilePath $Path -ArgumentList $NativeArgs -WorkingDirectory $At
     if ($result.ExitCode -ne $ExpectedExit) { throw "Native program failed: $Path (exit $($result.ExitCode)); expected $ExpectedExit." }
     return $result
 }
-function Invoke-HdGit([string]$At, [string[]]$Args) {
+function Invoke-HdGit([string]$At, [string[]]$GitArgs) {
     $gitExe = Resolve-GitExecutable
-    $result = Invoke-HdNative $gitExe (@('-c', "safe.directory=$At", '-C', $At) + $Args) $At
+    $result = Invoke-HdNative $gitExe (@('-c', "safe.directory=$At", '-C', $At) + $GitArgs) $At
     return @($result.StdOut -split "`r?`n" | Where-Object { $_ -ne '' })
 }
 if (Test-Path -LiteralPath $testRoot) {
@@ -41,10 +41,17 @@ $resolverAst = $runnerAst.Find({ param($node) $node -is [System.Management.Autom
 Assert ($null -ne $resolverAst) 'Runner does not define Git executable resolution.'
 Invoke-Expression $resolverAst.Extent.Text
 $nativePatterns = @([regex]::Escape('2>') + '\s*&\s*1', '&\s*\$')
-$staticTargets = @(Get-ChildItem -LiteralPath (Join-Path $repo 'ops\windows') -Filter '*.ps1' -File | Select-Object -ExpandProperty FullName) + @($PSCommandPath)
+$staticTargets = @(Get-ChildItem -LiteralPath (Join-Path $repo 'ops\windows') -Filter '*.ps1' -File | Select-Object -ExpandProperty FullName) + @(Get-ChildItem -LiteralPath (Join-Path $repo 'tests') -Filter '*.ps1' -File | Select-Object -ExpandProperty FullName)
+$reservedParameterNames = @('Args', 'Input', 'This', '_', 'PSItem', 'Error', 'Host', 'Matches')
 foreach ($path in $staticTargets) {
     $sourceText = Get-Content -LiteralPath $path -Raw
     foreach ($pattern in $nativePatterns) { Assert (-not [regex]::IsMatch($sourceText, $pattern)) "Forbidden native invocation pattern in $([IO.Path]::GetFileName($path)): $pattern" }
+    $tokens = $null; $errors = $null
+    $fileAst = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+    foreach ($parameter in $fileAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.ParameterAst] }, $true)) {
+        $parameterName = $parameter.Name.VariablePath.UserPath
+        Assert ($reservedParameterNames -notcontains $parameterName) "Forbidden PowerShell parameter name '$parameterName' in $([IO.Path]::GetFileName($path))."
+    }
 }
 $simulatedCommands = @(
     [pscustomobject]@{Source='C:\Users\rayda\AppData\Local\hermes\git\bin\git.exe'},
@@ -70,8 +77,8 @@ param([string]$RepoPath)
 $stamp = [DateTime]::UtcNow.ToString('o')
 $social = @{schema_version='social-context.v2'; status='READY'; captured_at_utc=$stamp; research_only=$true; trade_authorization=$false; execution_allowed=$false; source_health=@{}; items=@()}
 $market = @{schema_version='market-opportunities.v1'; status='READY'; generated_at_utc=$stamp; market_data_captured_at_utc=$stamp; market_data_source='Fixture'; research_only=$true; trade_authorization=$false; execution_allowed=$false; candidates=@(); social_context=@{schema_version='social-context.v2'}}
-$social | ConvertTo-Json -Depth 8 -Compress | Set-Content -LiteralPath (Join-Path $RepoPath 'data\social-context-v2-latest.json') -Encoding UTF8
-$market | ConvertTo-Json -Depth 8 -Compress | Set-Content -LiteralPath (Join-Path $RepoPath 'data\market-opportunities-hourly-latest.json') -Encoding UTF8
+[IO.File]::WriteAllText((Join-Path $RepoPath 'data\social-context-v2-latest.json'), ($social | ConvertTo-Json -Depth 8 -Compress), (New-Object System.Text.UTF8Encoding($false)))
+[IO.File]::WriteAllText((Join-Path $RepoPath 'data\market-opportunities-hourly-latest.json'), ($market | ConvertTo-Json -Depth 8 -Compress), (New-Object System.Text.UTF8Encoding($false)))
 '@
     Set-Content -LiteralPath $fixture -Value $fixtureText -Encoding UTF8
     $failureFixtureText = @'
@@ -90,8 +97,8 @@ $ErrorActionPreference = 'Stop'
 $old = '2020-01-01T00:00:00Z'
 $social = @{schema_version='social-context.v2'; status='READY'; captured_at_utc=$old; research_only=$true; trade_authorization=$false; execution_allowed=$false; source_health=@{}; items=@()}
 $market = @{schema_version='market-opportunities.v1'; status='READY'; generated_at_utc=$old; market_data_captured_at_utc=$old; market_data_source='Race fixture'; research_only=$true; trade_authorization=$false; execution_allowed=$false; candidates=@(); social_context=@{schema_version='social-context.v2'}}
-$social | ConvertTo-Json -Depth 8 -Compress | Set-Content -LiteralPath (Join-Path $RemoteClonePath 'data\social-context-v2-latest.json') -Encoding UTF8
-$market | ConvertTo-Json -Depth 8 -Compress | Set-Content -LiteralPath (Join-Path $RemoteClonePath 'data\market-opportunities-hourly-latest.json') -Encoding UTF8
+[IO.File]::WriteAllText((Join-Path $RemoteClonePath 'data\social-context-v2-latest.json'), ($social | ConvertTo-Json -Depth 8 -Compress), (New-Object System.Text.UTF8Encoding($false)))
+[IO.File]::WriteAllText((Join-Path $RemoteClonePath 'data\market-opportunities-hourly-latest.json'), ($market | ConvertTo-Json -Depth 8 -Compress), (New-Object System.Text.UTF8Encoding($false)))
 $module = Join-Path $RemoteClonePath 'ops\windows\HypeDesk.Native.psm1'
 Import-Module -Name $module -Force
 $git = (Get-Command git -CommandType Application | Select-Object -First 1).Source
@@ -127,7 +134,7 @@ if ($result.ExitCode -ne 0) { exit $result.ExitCode }
     $initialFetch = Invoke-HdNative $gitExe @('-C', $clone, 'fetch', 'origin', 'main') $clone
     Assert ($initialFetch.StdErr -match '(?i)from ') 'git fetch did not exercise stderr output capture.'
     Invoke-HdGit $clone @('add', 'ops/windows/install-hypedesk.ps1', 'ops/windows/uninstall-hypedesk.ps1', 'ops/windows/run-hypedesk.ps1') | Out-Null
-    Invoke-HdGit $clone @('commit', '-m', 'Seed disposable publisher test') | Out-Null
+    Invoke-HdGit $clone @('commit', '--allow-empty', '-m', 'Seed disposable publisher test') | Out-Null
     Invoke-HdGit $clone @('push', 'origin', 'main') | Out-Null
     $null = Invoke-HdNative $gitExe @("--git-dir=$bare", 'symbolic-ref', 'HEAD', 'refs/heads/main') $repo
     $null = Invoke-HdNative $gitExe @('clone', $bare, $raceClone) $repo
@@ -138,14 +145,14 @@ if ($result.ExitCode -ne 0) { exit $result.ExitCode }
     $state = Join-Path $installRoot 'state'
     New-Item -ItemType Directory -Force -Path $state | Out-Null
     $inventoryPath = Join-Path $state 'mock-task-inventory.json'
-    @(@{TaskName='Unrelated-Test-Task'; Marker='keep-me'}) | ConvertTo-Json | Set-Content -LiteralPath $inventoryPath -Encoding UTF8
+    [IO.File]::WriteAllText($inventoryPath, (ConvertTo-Json -InputObject @(@{TaskName='Unrelated-Test-Task'; Marker='keep-me'})), (New-Object System.Text.UTF8Encoding($false)))
     Invoke-HdGit $clone @('remote', 'set-url', 'origin', 'https://github.com/attacker/not-market-attention.git') | Out-Null
     $powershellExe = Join-Path $PSHOME 'powershell.exe'
     $wrongOriginInstall = Invoke-HdNative $powershellExe @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $installer, '-InstallRoot', $installRoot, '-TestMode') $repo 1
     Assert ($wrongOriginInstall.ExitCode -eq 1) 'Installer accepted an origin outside the disposable test root.'
     Invoke-HdGit $clone @('remote', 'set-url', 'origin', $bare) | Out-Null
     $installOutput = Invoke-HdNative $powershellExe @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $installer, '-InstallRoot', $installRoot, '-TestMode') $repo
-    $inventory = @(Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json)
+    $inventory = @(foreach ($hdItem in (Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json)) { $hdItem })
     Assert (@($inventory | Where-Object TaskName -eq 'Unrelated-Test-Task').Count -eq 1) 'Installer did not preserve the unrelated mocked task.'
     Assert (@($inventory | Where-Object TaskName -eq 'MarketAttention-HypeDesk-Hourly').Count -eq 1) 'Installer did not register exactly its mocked task.'
 
@@ -201,7 +208,7 @@ if ($result.ExitCode -ne 0) { exit $result.ExitCode }
     Remove-Item -LiteralPath $lock -Force
 
     $uninstallOutput = Invoke-HdNative $powershellExe @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $uninstaller, '-InstallRoot', $installRoot, '-TestMode') $repo
-    $inventory = @(Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json)
+    $inventory = @(foreach ($hdItem in (Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json)) { $hdItem })
     Assert (@($inventory | Where-Object TaskName -eq 'Unrelated-Test-Task').Count -eq 1) 'Uninstaller removed/changed the unrelated mocked task.'
     Assert (@($inventory | Where-Object TaskName -eq 'MarketAttention-HypeDesk-Hourly').Count -eq 0) 'Uninstaller left its mocked task behind.'
 

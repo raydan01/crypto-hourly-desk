@@ -157,6 +157,14 @@ try {
   assert.match(primaryPairCheck.primaryLabel, /eth-dex/, JSON.stringify(primaryPairCheck));
   assert.doesNotMatch(primaryPairCheck.solanaLabels, /Primary pair/, JSON.stringify(primaryPairCheck));
   assert.match(primaryPairCheck.ethereumLabels, /Primary pair \(highest known liquidity\)/, JSON.stringify(primaryPairCheck));
+  const pairAgeDisplay = await evaluate(`(() => {
+    const item={coingecko_id:"age-check",name:"Age Check",symbol:"AGE",trending:{rank:1},market:{},identity:{contracts:[]},mentions:{},fomo_watch:{status:"UNKNOWN",observations:[]},dex_pairs:[{is_primary:true,dex_id:"age-dex",pair_address:"age-pair",liquidity_usd:100,age_seconds:400*86400,pair_created_at_utc:new Date(Date.now()-400*86400*1000).toISOString(),price_change_by_period:{h24:0}}]};
+    window.renderHype({captured_at_utc:new Date().toISOString(),items:[item]});
+    const card=document.querySelector("#social-items .hype-card"); card.open=true;
+    return {summary:card.querySelector("summary").innerText,row:card.querySelector(".pair-row p").innerText};
+  })()`);
+  assert.match(pairAgeDisplay.summary, /pair 1\.1y old/, JSON.stringify(pairAgeDisplay));
+  assert.match(pairAgeDisplay.row, /Pair age 1\.1y ago/, JSON.stringify(pairAgeDisplay));
   const parityCases = ["crawlerpad", "pudgy-penguins"].map(id => ({current:firstCapture.items.find(item=>item.coingecko_id===id), prior:null}));
   const momentumCases = ["crawlerpad", "quantus", "bunker-mode", "identity-md-6900"].map(id => ({current:secondCapture.items.find(item=>item.coingecko_id===id), prior:firstCapture.items.find(item=>item.coingecko_id===id)}));
   const parityReplay = await evaluate(`(() => { const rules=${JSON.stringify(JSON.parse(rules.toString("utf8")))}; const observations=${JSON.stringify(parityCases)}.map(row=>({id:row.current.coingecko_id,result:window.evaluateAttentionRules(row.current,rules,row.prior)})); const momentum=${JSON.stringify(momentumCases)}.map(row=>({id:row.current.coingecko_id,state:window.evaluateAttentionRules(row.current,rules,row.prior).momentum.state})); const missing=window.calculateAttentionMomentum(null,null,null,null,rules,false); return {observations,momentum,missing}; })()`);
