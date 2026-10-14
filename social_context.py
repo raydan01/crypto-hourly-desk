@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 UA = "crypto-hourly-desk/1.1"
 ROOT = Path(__file__).parent
+ATTENTION_RULES_PATH = ROOT / "data" / "attention-rules.json"
 V2_PATH = ROOT / "data" / "social-context-v2-latest.json"
 RETRY_DELAYS_SECONDS = (2, 5)
 MAX_TRENDING = 20
@@ -37,6 +38,98 @@ _last_response_headers = {}
 _reddit_stopped = False
 _cg_identity_stopped = False
 _cg_identity_deadline = None
+
+
+def load_attention_rules() -> dict:
+    """Load the shared, versioned attention contract used by both evaluators."""
+    value = json.loads(ATTENTION_RULES_PATH.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or value.get("schema") != "market-attention-rules.v1":
+        raise ValueError("unsupported attention rules schema")
+    return value
+
+
+def _numeric(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def select_primary_pair(pairs: list[dict], rules: dict | None = None) -> dict | None:
+    """Select the highest-liquidity known pair, as specified by the shared table."""
+    rules = rules or load_attention_rules()
+    selection = rules["primary_pair"]
+    field = selection["liquidity_field"]
+    eligible = [pair for pair in pairs if _numeric(pair.get(field))] if selection["require_numeric_liquidity"] else list(pairs)
+    if not eligible:
+        return None
+    if selection["select"] != "maximum":
+        raise ValueError("unsupported primary pair selection")
+    return max(eligible, key=lambda pair: pair[field])
+
+
+def evaluate_momentum_state(rank_change, volume_change_pct, *, has_valid_history: bool = True, rules: dict | None = None) -> str:
+    """Evaluate binding momentum semantics using thresholds from attention-rules.json."""
+    rules = rules or load_attention_rules()
+    if not has_valid_history or not _numeric(rank_change) or not _numeric(volume_change_pct):
+        return "INSUFFICIENT_HISTORY"
+    band = rules["momentum"]["volume_noise_band_percent_inclusive"]
+    rank_direction = 1 if rank_change > 0 else -1 if rank_change < 0 else 0
+    volume_direction = 1 if volume_change_pct > band else -1 if volume_change_pct < -band else 0
+    if rank_direction and volume_direction and rank_direction != volume_direction:
+        return "MIXED"
+    if rank_direction > 0 or (rank_direction == 0 and volume_direction > 0):
+        return "RISING"
+    if rank_direction < 0 or (rank_direction == 0 and volume_direction < 0):
+        return "FADING"
+    return "FLAT"
+
+
+def evaluate_attention_observations(pairs: list[dict], market: dict, rules: dict | None = None) -> list[dict]:
+    """Compute the existing descriptive observations from shared rule parameters."""
+    rules = rules or load_attention_rules()
+    selected = select_primary_pair(pairs, rules)
+    for pair in pairs:
+        pair["is_primary"] = pair is selected
+    observations = []
+    definitions = rules["observations"]
+    for pair in pairs:
+        primary = pair.get("is_primary") is True
+        identity = {"pair_address": pair.get("pair_address"), "dex_id": pair.get("dex_id")}
+        source = f"{pair.get('dex_id') or 'DEX'} DEX Screener"
+        liquidity = pair.get("liquidity_usd")
+        denominator = None
+        for field in definitions["liquidity_under_value"]["denominator_priority"]:
+            candidate = market.get("market_cap_usd") if field == "coingecko_market_cap_usd" else pair.get(field)
+            if candidate:
+                denominator = candidate
+                break
+        age_rule = definitions["pair_under_24h"]
+        if age_rule["primary_pair_only"] and primary and pair.get("age_seconds") is not None and pair["age_seconds"] < age_rule["max_age_seconds_exclusive"]:
+            observations.append({"kind": age_rule["kind"], "source": source, "age_seconds": pair["age_seconds"], "pair_age_seconds": pair["age_seconds"], **identity})
+        liq_rule = definitions["liquidity_under_value"]
+        if liq_rule["primary_pair_only"] and primary and _numeric(liquidity) and _numeric(denominator) and denominator > 0 and liquidity / denominator * 100 < liq_rule["ratio_percent_exclusive"]:
+            observations.append({"kind": liq_rule["kind"], "source": source, "age_seconds": pair.get("age_seconds"), "liquidity_usd": liquidity, "fdv_or_market_cap_usd": denominator, "ratio_pct": liquidity / denominator * 100, **identity})
+        tx_rule = definitions["buy_sell_imbalance"]
+        tx = (pair.get("buys_sells_by_period") or {}).get(tx_rule["period"]) or {}
+        buys, sells = tx.get("buys"), tx.get("sells")
+        if _numeric(buys) and _numeric(sells) and min(buys, sells) >= 0 and max(buys, sells) >= tx_rule["minimum_larger_side_transactions_inclusive"]:
+            denominator_count = max(tx_rule["minimum_smaller_side_denominator"], sells)
+            if buys / denominator_count >= tx_rule["ratio_inclusive"] and (not tx_rule["primary_pair_only"] or primary):
+                observations.append({"kind": tx_rule["kind"], "source": f"{source} 24h transactions", "age_seconds": pair.get("age_seconds"), "buys_24h": buys, "sells_24h": sells, **identity})
+            sell_rule = definitions["selling_pressure"]
+            sell_denominator = max(sell_rule["minimum_smaller_side_denominator"], buys)
+            if sells / sell_denominator >= sell_rule["ratio_inclusive"] and (not sell_rule["primary_pair_only"] or primary):
+                observations.append({"kind": sell_rule["kind"], "source": f"{source} 24h transactions", "age_seconds": pair.get("age_seconds"), "buys_24h": buys, "sells_24h": sells, **identity})
+        move_rule = definitions["dex_price_move"]
+        pair_change = (pair.get("price_change_by_period") or {}).get(move_rule["period"])
+        if move_rule["primary_pair_only"] and primary and _numeric(pair_change) and abs(pair_change) > move_rule["absolute_percent_exclusive"]:
+            observations.append({"kind": move_rule["kind"], "source": f"{source} 24h price move", "age_seconds": pair.get("age_seconds"), "change_24h_pct": pair_change, **identity})
+    volume_rule = definitions["volume_above_market_cap"]
+    volume, cap = market.get("volume_24h_usd"), market.get("market_cap_usd")
+    comparison = volume_rule["comparison"]
+    if comparison != "strictly_greater":
+        raise ValueError("unsupported volume-to-market-cap comparison")
+    if _numeric(volume) and _numeric(cap) and volume > cap:
+        observations.append({"kind": volume_rule["kind"], "source": "CoinGecko 24h volume and market cap", "age_seconds": 0, "volume_24h_usd": volume, "market_cap_usd": cap})
+    return observations
 
 
 class RedditUnavailable(RuntimeError):
@@ -461,6 +554,7 @@ def validate_social_context(value: dict) -> bool:
 
 def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MAX_ENRICHED, previous: dict | None = None, now: datetime | None = None) -> dict:
     """Production-default collector. Previous v2 state is read from the published artifact."""
+    attention_rules = load_attention_rules()
     captured_at = now or _now()
     previous = previous if previous is not None else _old_capture()
     global _reddit_stopped
@@ -511,12 +605,12 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
         for contract in contracts:
             dex_pairs.extend(_dex(contract, captured_at))
         dex_pairs.sort(key=lambda pair: (pair["liquidity_usd"] is not None, float(pair["liquidity_usd"] or 0)), reverse=True)
-        primary_pair = next((pair for pair in dex_pairs if pair["liquidity_usd"] is not None), None)
+        primary_pair = select_primary_pair(dex_pairs, attention_rules)
         for pair in dex_pairs:
             pair["is_primary"] = pair is primary_pair
         rank_change = old.get("trending", {}).get("rank") - rank if old.get("trending", {}).get("rank") is not None else None
         old_volume = (old.get("market") or {}).get("volume_24h_usd")
-        volume_change = round((volume / old_volume - 1) * 100, 6) if isinstance(volume, (int, float)) and isinstance(old_volume, (int, float)) and old_volume else None
+        volume_change = round(((volume - old_volume) / old_volume) * 100, 6) if isinstance(volume, (int, float)) and isinstance(old_volume, (int, float)) and old_volume else None
         mention_changes = {}
         for source, current in (("google_news", news), ("reddit", reddit)):
             prior = (old.get("mentions", {}).get(source) or {})
@@ -533,42 +627,12 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
         elif not comparable or rank_change is None or volume_change is None:
             state = "INSUFFICIENT_HISTORY"
         else:
-            rank_direction = 1 if rank_change > 0 else -1 if rank_change < 0 else 0
-            volume_direction = 1 if volume_change >= 5 else -1 if volume_change <= -5 else 0
-            if rank_direction and volume_direction and rank_direction != volume_direction:
-                state = "MIXED"
-            elif rank_direction > 0 or (rank_direction == 0 and volume_direction > 0):
-                state = "RISING"
-            elif rank_direction < 0 or (rank_direction == 0 and volume_direction < 0):
-                state = "FADING"
-            else:
-                state = "FLAT"
+            state = evaluate_momentum_state(rank_change, volume_change, rules=attention_rules)
         market_change = identity.get("market_change_24h_pct")
         if identity.get("source") == "CACHE":
             market_change = _coin_market_change(coin_id)
         market = {"price_usd": _number(data.get("price_value", data.get("price"))), "market_cap_usd": market_cap, "volume_24h_usd": volume, "volume_market_cap_ratio": volume / market_cap if isinstance(volume, (int, float)) and isinstance(market_cap, (int, float)) and market_cap else None, "change_24h_pct": market_change, "change_24h_source": "CoinGecko /coins market_data" if market_change is not None else None, "captured_at_utc": _iso(captured_at)}
-        observations = []
-        for pair in dex_pairs:
-            is_primary = pair.get("is_primary") is True
-            pair_identity = {"pair_address": pair.get("pair_address"), "dex_id": pair.get("dex_id")}
-            pair_source = f"{pair.get('dex_id') or 'DEX'} DEX Screener"
-            liq = pair.get("liquidity_usd")
-            denom = pair.get("fdv_usd") or pair.get("market_cap_usd") or market_cap
-            tx24 = (pair.get("buys_sells_by_period") or {}).get("h24") or {}
-            buys, sells = tx24.get("buys"), tx24.get("sells")
-            if is_primary and pair.get("age_seconds") is not None and pair["age_seconds"] < 86400:
-                observations.append({"kind": "PAIR_UNDER_24H", "source": pair_source, "age_seconds": pair["age_seconds"], "pair_age_seconds": pair["age_seconds"], **pair_identity})
-            if is_primary and isinstance(liq, (int, float)) and isinstance(denom, (int, float)) and denom > 0 and liq / denom < .05:
-                observations.append({"kind": "LIQUIDITY_UNDER_5_PERCENT", "source": pair_source, "age_seconds": pair.get("age_seconds"), "liquidity_usd": liq, "fdv_or_market_cap_usd": denom, "ratio_pct": liq / denom * 100, **pair_identity})
-            if isinstance(buys, (int, float)) and isinstance(sells, (int, float)) and min(buys, sells) >= 0 and max(buys, sells) >= 20:
-                if buys >= 1.5 * max(1, sells) and is_primary:
-                    observations.append({"kind": "BUY_SELL_IMBALANCE", "source": f"{pair_source} 24h transactions", "age_seconds": pair.get("age_seconds"), "buys_24h": buys, "sells_24h": sells, **pair_identity})
-                elif sells >= 1.5 * max(1, buys):
-                    observations.append({"kind": "SELLING_PRESSURE", "source": f"{pair_source} 24h transactions", "age_seconds": pair.get("age_seconds"), "buys_24h": buys, "sells_24h": sells, **pair_identity})
-            pair_change = (pair.get("price_change_by_period") or {}).get("h24")
-            if is_primary and isinstance(pair_change, (int, float)) and abs(pair_change) > 100:
-                observations.append({"kind": "DEX_PRICE_MOVE", "source": f"{pair_source} 24h price move", "age_seconds": pair.get("age_seconds"), "change_24h_pct": pair_change, **pair_identity})
-        if isinstance(volume, (int, float)) and isinstance(market_cap, (int, float)) and volume > market_cap: observations.append({"kind": "VOLUME_ABOVE_MARKET_CAP", "source": "CoinGecko 24h volume and market cap", "age_seconds": 0, "volume_24h_usd": volume, "market_cap_usd": market_cap})
+        observations = evaluate_attention_observations(dex_pairs, market, attention_rules)
         items.append({"coingecko_id": coin_id, "name": name, "symbol": symbol, "observed_at_utc": _iso(captured_at), "trending": {"rank": rank, "previous_rank": old.get("trending", {}).get("rank") if comparable else None, "change": rank_change, "state": state, "window": "rolling 24h"}, "market": market, "identity": identity, "mentions": {"google_news": news, "reddit": reddit}, "dex_pairs": dex_pairs, "momentum": {"rank_change": rank_change, "volume_change_pct": volume_change, "mention_change_by_source": mention_changes, "comparison_at_utc": comparison, "state": state}, "fomo_watch": {"status": "WATCH_ONLY" if observations else "NO_OBSERVATION" if dex_pairs else "UNKNOWN", "observations": observations, "disclaimer": "Descriptive observations only; no score, direction, or trade gate."}})
     for source in ("google_news", "reddit"):
         vals = [item["mentions"][source] for item in items if item["mentions"][source]["status"] != "NOT_QUERIED"]

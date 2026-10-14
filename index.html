@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -23,7 +23,8 @@
     </nav>
     <section id="hype-view" class="view-pane">
     <section class="panel social-panel">
-      <div class="section-head"><div><p class="eyebrow">PUBLIC MARKET CONTEXT · HOURLY TARGET</p><h2>Hype</h2></div><span id="social-status" class="pill">LOADING</span></div>
+      <div class="section-head hype-head"><div><p class="eyebrow">PUBLIC MARKET CONTEXT · HOURLY TARGET</p><h2>Hype</h2></div><div class="hype-head-actions"><button id="hype-refresh-button" type="button" aria-label="Refresh Hype data">Refresh</button><span id="social-status" class="pill">LOADING</span></div></div>
+      <p id="hype-refresh-status" class="muted" role="status" aria-live="polite">Refreshing Hype dataâ€¦</p>
       <p id="social-summary" class="muted">Loading CoinGecko identity, recent mentions, and address based market context.</p>
       <div id="social-health" class="social-health"></div>
       <p class="social-disclaimer">Hype is separate research context. It does not affect the opportunity score or direction label and does not authorize or block a trade.</p>
@@ -34,7 +35,7 @@
     <section class="notice"><strong>Manual review only</strong><span>No orders, credentials, margin, or short execution. Opening the app and Quick scan request fresh Kraken quotes; Deep scan requests fresh candle history and reports its completion time.</span></section>
     <section class="panel search-panel">
       <label for="coin-search">Search a coin or project</label>
-      <div class="search-row"><input id="coin-search" type="search" placeholder="BTC, ETH, XRP…" autocomplete="off"><button id="search-button" type="button">Search</button></div>
+      <div class="search-row"><input id="coin-search" type="search" placeholder="BTC, ETH, XRPâ€¦" autocomplete="off"><button id="search-button" type="button">Search</button></div>
       <p id="search-status" class="muted">Public Kraken USD spot data only.</p>
       <div id="search-result" class="result" hidden></div>
     </section>
@@ -45,7 +46,7 @@
       <button class="tab" type="button" role="tab" aria-selected="false" data-mode="long-term">3+ months</button>
     </div>
     <div class="direction-tabs" role="tablist" aria-label="Opportunity direction"><button class="direction-tab active" type="button" data-direction="all">All</button><button class="direction-tab" type="button" data-direction="LONG_RESEARCH">Top longs</button><button class="direction-tab" type="button" data-direction="SHORT_RESEARCH">Top shorts</button><button class="direction-tab" type="button" data-direction="AVOID">Avoid/watch</button></div>
-    <p id="scan-summary" class="muted">Loading the latest hourly scan…</p>
+    <p id="scan-summary" class="muted">Loading the latest hourly scanâ€¦</p>
     <div class="scan-actions"><button id="refresh-button" type="button">Quick scan</button><button id="deep-scan-button" type="button" class="secondary">Deep scan</button></div>
     <section id="opportunities" class="cards"></section>
     <section class="panel footer-note"><strong>How to use this</strong><p>Review the entry zone, invalidation, and targets. Confirm the market yourself before placing any manual spot trade. A BEARISH SETUP is monitoring-only and remains blocked for short execution until margin is independently verified.</p></section>

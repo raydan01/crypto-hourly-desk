@@ -17,6 +17,15 @@ const modeConfig = {hourly: {file: "data/market-opportunities-hourly-latest.json
 const DEEP_SCAN_MIN_MS = 15000;
 const REQUEST_TIMEOUT_MS = 30000;
 const REQUEST_RETRY_DELAYS_MS = [300, 1000, 2500];
+const HYPE_REFRESH_MIN_MS = 60000;
+const COINGECKO_TRENDING_URL = "https://api.coingecko.com/api/v3/search/trending";
+const DEX_TOKEN_PAIRS_URL = "https://api.dexscreener.com/token-pairs/v1";
+const HYPE_SUPPORTED_CHAINS = new Set(["solana", "ethereum", "binance-smart-chain", "polygon-pos", "arbitrum-one", "optimistic-ethereum", "base", "robinhood"]);
+let hypeRefreshPromise = null;
+let lastHypeRefreshStartedAt = 0;
+let lastHypeRefreshFinishedAt = null;
+let hypeRules = null;
+let hypeLiveAt = null;
 
 function freshUrl(url) {
   return `${url}${url.includes("?") ? "&" : "?"}_fresh=${Date.now()}_${Math.random().toString(36).slice(2)}`;
@@ -142,7 +151,14 @@ function render() {
   $("#opportunities").innerHTML = choices.length ? choices.map(card).join("") : `<div class="panel"><strong>No directional setup cleared this hour.</strong><p class="muted">${bearish} bearish candidate${bearish === 1 ? " was" : "s were"} found in the latest scan. All labels are monitoring-only until independently verified.</p></div>`;
 }
 
-function renderHype(social) {
+function primaryPair(item) {
+  const pairs = (item.dex_pairs || []).filter(pair => attentionNumber(pair.liquidity_usd) != null)
+    .sort((left, right) => attentionNumber(right.liquidity_usd) - attentionNumber(left.liquidity_usd));
+  const selected = item.fomo_watch?.primary_pair;
+  return (selected && pairs.find(pair => pair.pair_address === selected.pair_address && pair.dex_id === selected.dex_id)) || pairs[0] || null;
+}
+
+function renderHype(social, refreshInfo = {}) {
   if (!social) {
     $("#social-status").textContent = "HYPE DATA UNAVAILABLE";
     $("#social-summary").textContent = "Hype data unavailable. The Hype artifact could not be loaded.";
@@ -158,9 +174,11 @@ function renderHype(social) {
   $("#social-status").textContent = stale ? "STALE DATA" : degraded ? "DEGRADED SOURCES" : String(social.status || "NO DATA").replaceAll("_", " ");
   const captureAgeLabel = captureAge == null ? "age unknown" : captureAge < 3600 ? `${Math.max(0, Math.floor(captureAge / 60))}m old` : `${(Math.max(0, captureAge) / 3600).toFixed(1)}h old`;
   const attribution = social.attribution || "CoinGecko attribution applies when its data is present.";
-  $("#social-summary").textContent = items.length ? `${items.length} trending projects (${captureAgeLabel}; stale after 2h). Counts are matching, dated RSS items. ${attribution}` : `No Hype data available (${captureAgeLabel}). ${attribution}`;
+  const liveLabel = refreshInfo.liveAt ? `Live CoinGecko and DEX values captured ${new Date(refreshInfo.liveAt).toLocaleString()}. News, listings, identity and related buzz are from the background capture ${social.captured_at_utc ? new Date(social.captured_at_utc).toLocaleString() : "with age unknown"}.` : `Background artifact captured ${social.captured_at_utc ? new Date(social.captured_at_utc).toLocaleString() : "with age unknown"}.`;
+  $("#social-summary").textContent = `${items.length ? `${items.length} trending projects (${captureAgeLabel}; stale after 2h). Counts are matching, dated RSS items. ` : `No Hype data available (${captureAgeLabel}). `}${liveLabel} ${attribution}`;
   $("#social-health").innerHTML = Object.entries(health).map(([name, value]) => { const status = String(value.status || "UNKNOWN").toUpperCase(); const warning = status !== "FRESH"; return `<span class="${warning ? "warning" : "fresh"}">${escapeHtml(name.replaceAll("_", " "))}: <strong>${value.error_class === "RATE_LIMITED" ? "rate-limited" : escapeHtml(value.status || "UNKNOWN")}</strong></span>`; }).join("");
-  const formatAge = seconds => seconds == null || !Number.isFinite(seconds) ? "age unknown" : seconds < 3600 ? `${Math.floor(seconds / 60)}m ago` : seconds < 86400 ? `${(seconds / 3600).toFixed(1)}h ago` : `${(seconds / 86400).toFixed(1)}d ago`;
+  if (refreshInfo.failure) $("#social-health").innerHTML = `<span class="warning">Live refresh: <strong>${escapeHtml(refreshInfo.failure)}</strong></span>${$("#social-health").innerHTML}`;
+  const formatAge = seconds => seconds == null || !Number.isFinite(seconds) ? "age unknown" : seconds < 3600 ? `${Math.floor(seconds / 60)}m ago` : seconds < 72 * 3600 ? `${(seconds / 3600).toFixed(1)}h ago` : seconds < 365 * 86400 ? `${Math.floor(seconds / 86400)}d ago` : `${(seconds / (365 * 86400)).toFixed(1)}y ago`;
   const ageAt = timestamp => { const parsed = Date.parse(timestamp || ""); if (!Number.isFinite(parsed)) return "age unknown"; const seconds = (Date.now() - parsed) / 1000; return seconds < -5 ? "age unknown" : formatAge(Math.max(0, seconds)); };
   const newestMentionAt = item => [item.mentions?.google_news?.newest_published_at_utc, item.mentions?.reddit?.newest_published_at_utc].filter(Boolean).sort((left, right) => Date.parse(right) - Date.parse(left))[0] || null;
   const count = (mention, window) => mention?.status === "FRESH" ? String(mention[`coin_count_${window}`] ?? "unknown") : "unknown";
@@ -176,6 +194,7 @@ function renderHype(social) {
   const formatCheckedChains = new Set(["solana", "ethereum", "binance-smart-chain", "polygon-pos", "arbitrum-one", "optimistic-ethereum", "base", "robinhood"]);
   const identity = item => {
     const contracts = item.identity?.contracts || [];
+    if (item.unmatched_live) return `<p class="muted">address not checked yet (next background refresh)</p>`;
     if (item.identity?.status === "LOOKUP_FAILED") return `<p class="muted">Contract lookup failed this capture (CoinGecko limit). Retry next hour</p>`;
     if (!contracts.length) return `<p class="muted">Identity: ${escapeHtml(item.identity?.status === "MALFORMED" ? "MALFORMED: " : "")}${escapeHtml(item.identity?.warning || "contract unavailable")}. No name based market links.</p>`;
     const knownMalformed = contracts.some(contract => formatCheckedChains.has(contract.chain) && contract.status === "MALFORMED");
@@ -183,56 +202,21 @@ function renderHype(social) {
   };
   const pairDetails = (item, contract, requestedPairs = item.dex_pairs || []) => {
     const pairs = [...requestedPairs].sort((left, right) => Number(right.liquidity_usd != null) - Number(left.liquidity_usd != null) || Number(right.liquidity_usd || 0) - Number(left.liquidity_usd || 0));
+    const selectedPrimary = primaryPair(item);
     if (!pairs.length) { const status = contract?.dex_status || "NOT_QUERIED"; const message = status === "FAILED" ? `DEX Screener lookup failed (${escapeHtml(contract.dex_error_class || "unknown error")}); pairs unknown` : status === "FRESH" ? "No DEX pairs found for this address" : status === "UNSUPPORTED" ? "DEX lookup not supported for this chain" : "DEX not checked this capture"; return `<p class="muted">${message}</p>`; }
     return `<div class="pair-list">${pairs.map((pair, index) => {
       const tx24 = pair.buys_sells_by_period?.h24 || {};
       const v24 = pair.volume_by_period?.h24;
       const changes = pair.price_change_by_period || {};
-      const primary = pair.is_primary === true || (pair.is_primary == null && index === 0 && pair.liquidity_usd != null);
+      const primary = Boolean(selectedPrimary && pair.pair_address === selectedPrimary.pair_address && pair.dex_id === selectedPrimary.dex_id);
       return `<div class="pair-row"><strong>${escapeHtml(pair.dex_id || "DEX")} ${primary ? "? Primary pair (highest known liquidity)" : ""}</strong>${pair.pair_url ? `<a href="${escapeHtml(pair.pair_url)}" target="_blank" rel="noopener noreferrer">Open pair</a>` : ""}<p>Pair age ${ageAt(pair.pair_created_at_utc)} | liquidity ${money(pair.liquidity_usd)} | FDV ${money(pair.fdv_usd)} | 24h volume ${money(v24)} | 24h buys ${tx24.buys ?? "unknown"} / sells ${tx24.sells ?? "unknown"} | 24h move ${changes.h24 == null ? "unknown" : `${Number(changes.h24).toLocaleString(undefined, {maximumFractionDigits: 2})}%`} | DEX Screener</p></div>`;
     }).join("")}</div>`;
   };
   const compactMoney = value => value == null ? "unknown" : `$${Number(value).toLocaleString(undefined, {notation: "compact", maximumFractionDigits: 1})}`;
-  const compactAge = seconds => seconds == null || !Number.isFinite(Number(seconds)) ? "unknown" : Number(seconds) < 3600 ? `${Math.floor(Number(seconds) / 60)}m` : `${Math.floor(Number(seconds) / 3600)}h`;
-  const primaryPair = item => [...(item.dex_pairs || [])].filter(pair => pair.liquidity_usd != null).sort((a, b) => Number(b.liquidity_usd) - Number(a.liquidity_usd))[0] || (item.dex_pairs || []).find(pair => pair.is_primary === true) || (item.dex_pairs || [])[0] || null;
-  const observationPair = (row, item) => {
-    const pairs = item.dex_pairs || [];
-    if (row.pair_address) return pairs.find(pair => pair.pair_address === row.pair_address && (!row.dex_id || pair.dex_id === row.dex_id)) || null;
-    if (row.kind === "PAIR_UNDER_24H") { const matches = pairs.filter(pair => pair.age_seconds === (row.pair_age_seconds ?? row.age_seconds)); return matches.length === 1 ? matches[0] : null; }
-    if (row.kind === "LIQUIDITY_UNDER_5_PERCENT") return pairs.find(pair => pair.liquidity_usd === row.liquidity_usd) || null;
-    if (["BUY_SELL_IMBALANCE", "SELLING_PRESSURE"].includes(row.kind)) return pairs.find(pair => { const tx = pair.buys_sells_by_period?.h24 || {}; return tx.buys === row.buys_24h && tx.sells === row.sells_24h; }) || null;
-    if (row.kind === "DEX_PRICE_MOVE") return pairs.find(pair => pair.price_change_by_period?.h24 === row.change_24h_pct) || null;
-    return null;
-  };
-  const observationsFor = item => {
-    const primary = primaryPair(item);
-    const seenFlagKinds = new Set();
-    const rows = (item.fomo_watch?.observations || []).flatMap(row => {
-      const pair = observationPair(row, item);
-      const pairSpecific = ["PAIR_UNDER_24H", "LIQUIDITY_UNDER_5_PERCENT", "BUY_SELL_IMBALANCE", "SELLING_PRESSURE", "DEX_PRICE_MOVE"].includes(row.kind);
-      if (pairSpecific && !pair) return [];
-      const values = pair ? {...row, pair_address: row.pair_address || pair.pair_address, dex_id: row.dex_id || pair.dex_id} : row;
-      if (["BUY_SELL_IMBALANCE", "SELLING_PRESSURE"].includes(row.kind)) {
-        const buys = Number(values.buys_24h), sells = Number(values.sells_24h);
-        if (!Number.isFinite(buys) || !Number.isFinite(sells) || Math.max(buys, sells) < 20 || Math.max(buys, sells) < 1.5 * Math.max(1, Math.min(buys, sells))) return [];
-        if (sells >= 1.5 * Math.max(1, buys)) values.kind = "SELLING_PRESSURE";
-        else if (buys >= 1.5 * Math.max(1, sells) && pair === primary) values.kind = "BUY_SELL_IMBALANCE";
-        else return [];
-      }
-      if (pairSpecific && values.kind !== "SELLING_PRESSURE" && pair !== primary) return [];
-      if (values.kind !== "SELLING_PRESSURE") {
-        if (seenFlagKinds.has(values.kind)) return [];
-        seenFlagKinds.add(values.kind);
-      }
-      return [{...values, pair}];
-    });
-    const move = primary?.price_change_by_period?.h24;
-    if (move != null && Math.abs(Number(move)) >= 100 && !rows.some(row => ["PRICE_MOVE_ABOVE_100_PERCENT", "DEX_PRICE_MOVE"].includes(row.kind))) rows.push({kind: "DEX_PRICE_MOVE", source: `${primary.dex_id || "DEX"} DEX Screener 24h price move`, change_24h_pct: move, pair_address: primary.pair_address, dex_id: primary.dex_id, pair: primary});
-    return rows;
-  };
+  const compactAge = seconds => seconds == null || !Number.isFinite(Number(seconds)) ? "unknown" : Number(seconds) < 3600 ? `${Math.floor(Number(seconds) / 60)}m` : Number(seconds) < 72 * 3600 ? `${Math.floor(Number(seconds) / 3600)}h` : Number(seconds) < 365 * 86400 ? `${Math.floor(Number(seconds) / 86400)}d` : `${(Number(seconds) / (365 * 86400)).toFixed(1)}y`;
   const observationLine = (row, item) => {
     const values = row;
-    const pair = row.pair || observationPair(row, item);
+    const pair = (item.dex_pairs || []).find(candidate => row.pair_address && candidate.pair_address === row.pair_address && (!row.dex_id || candidate.dex_id === row.dex_id)) || null;
     const source = String(row.source || "").toLowerCase().includes("coingecko") ? "CoinGecko" : `${values.dex_id || pair?.dex_id || "DEX"}, DEX Screener`;
     const pairLabel = pair ? `; pair ${pair.dex_id || "DEX"} ${pair.pair_address || "address unknown"}` : "";
     const ratioText = ratio => Number.isInteger(ratio) ? String(ratio) : ratio.toFixed(1);
@@ -253,12 +237,12 @@ function renderHype(social) {
     const momentum = item.momentum || {};
     const trending = item.trending || {};
     const fomo = item.fomo_watch || {};
-    const observationRows = observationsFor(item);
+    const observationRows = fomo.observations || [];
     const observations = observationRows.map(row => `<li class="${row.kind === "SELLING_PRESSURE" ? "selling-pressure" : "fomo-flag"}">${escapeHtml(observationLine(row, item))}</li>`).join("");
     const headlineTop = [item.mentions?.google_news, item.mentions?.reddit].flatMap(value => value?.headlines || []).sort((a, b) => Date.parse(b.published_at_utc) - Date.parse(a.published_at_utc)).slice(0, 3);
     const multiContract = (item.identity?.contracts || []).length > 1;
     const pairContent = multiContract ? `<label class="chain-picker">Choose a chain before loading address matched pairs<select class="pair-chain" data-coin-id="${escapeHtml(item.coingecko_id)}"><option value="">Choose chain</option>${item.identity.contracts.map(contract => `<option value="${escapeHtml(contract.chain)}">${escapeHtml(contract.chain)}</option>`).join("")}</select></label><div class="pair-results" data-coin-id="${escapeHtml(item.coingecko_id)}"><p class="muted">Choose a chain to show address matched pairs.</p></div>` : pairDetails(item, item.identity?.contracts?.[0]);
-    const primary = (item.dex_pairs || []).find(pair => pair.is_primary) || (item.dex_pairs || []).find(pair => pair.liquidity_usd != null) || (item.dex_pairs || [])[0];
+    const primary = primaryPair(item);
     const change = primary?.price_change_by_period?.h24;
     const move = change != null ? `${Number(change) > 0 ? "+" : ""}${Number(change).toLocaleString(undefined, {maximumFractionDigits: 2})}%` : item.market?.change_24h_pct != null && item.market?.change_24h_source ? `${Number(item.market.change_24h_pct) > 0 ? "+" : ""}${Number(item.market.change_24h_pct).toLocaleString()}%` : "unknown";
     const volumeRatio = item.market?.volume_market_cap_ratio;
@@ -267,22 +251,27 @@ function renderHype(social) {
     const rankHistory = trending.previous_rank != null ? `Rank #${trending.rank ?? "?"} (was #${trending.previous_rank})` : `Rank #${trending.rank ?? "?"} | first capture, no history yet`;
     const volumeChange = momentum.volume_change_pct;
     const volumeDirection = volumeChange == null ? "" : volumeChange > 0 ? "↑" : volumeChange < 0 ? "↓" : "→";
-    const rankChange = momentum.rank_change ?? trending.change;
-    let momentumState = momentum.state || trending.state || "unknown";
-    if (rankChange != null && volumeChange != null) {
-      const rankDirection = rankChange > 0 ? 1 : rankChange < 0 ? -1 : 0;
-      const volumeTrend = volumeChange >= 5 ? 1 : volumeChange <= -5 ? -1 : 0;
-      momentumState = rankDirection && volumeTrend && rankDirection !== volumeTrend ? "MIXED" : rankDirection > 0 || (rankDirection === 0 && volumeTrend > 0) ? "RISING" : rankDirection < 0 || (rankDirection === 0 && volumeTrend < 0) ? "FADING" : "FLAT";
-    }
+    const momentumState = momentum.state || "unknown";
     const momentumSummary = `${rankHistory} | ${volumeDirection} volume ${volumeChange == null ? "unknown" : `${Number(volumeChange) > 0 ? "+" : ""}${Number(volumeChange).toFixed(1)}%`} | ${String(momentumState).replaceAll("_", " ").toLowerCase()}`;
     const fomoCount = observationRows.filter(row => row.kind !== "SELLING_PRESSURE").length;
     const newsCount = count(item.mentions?.google_news, "24h");
     const redditAvailable = item.mentions?.reddit?.status === "FRESH";
     const capturedAt = item.observed_at_utc || social.captured_at_utc;
     const capturedLabel = capturedAt ? new Date(capturedAt).toLocaleString() : "capture time unknown";
+    const cardCaptureLabel = item.live_capture_at_utc ? `LIVE values ${new Date(item.live_capture_at_utc).toLocaleString()}; momentum since background capture ${item.background_capture_at_utc ? new Date(item.background_capture_at_utc).toLocaleString() : "unknown"}` : `background capture ${capturedLabel}`;
     const coinChange = item.market?.change_24h_pct == null || !item.market?.change_24h_source ? "unknown" : `${Number(item.market.change_24h_pct) > 0 ? "+" : ""}${Number(item.market.change_24h_pct).toLocaleString()}%`;
     return `<details class="hype-card"><summary><span class="summary-lines"><strong>${escapeHtml(item.name)} <small>${escapeHtml(item.symbol)}</small> <em class="chain-badge">${escapeHtml(chain)}</em> <small class="trend-rank">Trending #${trending.rank ?? "?"}</small></strong><span>24h ${move} (${change != null ? escapeHtml(primary?.dex_id || "DEX") : item.market?.change_24h_source ? "CoinGecko" : "source unknown"}) | Vol ${volumeRatio == null ? "unknown" : `${Number(volumeRatio).toFixed(1)}x`} mcap | pair ${pairAge} old</span><span>${fomoCount} FOMO flags | About this coin: ${newsCount} news / 24h${redditAvailable ? ` | ${count(item.mentions.reddit, "24h")} Reddit / 24h` : ""}</span></span></summary><div class="hype-body"><p class="card-history">${escapeHtml(momentumSummary)} | captured ${escapeHtml(capturedLabel)}</p><div class="metrics"><div class="metric"><span>CoinGecko price</span><strong>${money(item.market?.price_usd)}</strong></div><div class="metric"><span>Market cap</span><strong>${money(item.market?.market_cap_usd)}</strong></div><div class="metric"><span>24h volume</span><strong>${money(item.market?.volume_24h_usd)}</strong></div><div class="metric"><span>Volume / market cap | 24h</span><strong>${volumeRatio == null ? "unknown" : `${(volumeRatio * 100).toFixed(2)}%`}</strong></div><div class="metric"><span>CoinGecko 24h change</span><strong>${coinChange}</strong></div><div class="metric"><span>DEX primary pair 24h change (${escapeHtml(primary?.dex_id || "unknown source")})</span><strong>${change == null ? "unknown" : `${Number(change) > 0 ? "+" : ""}${Number(change).toLocaleString()}%`}</strong></div><div class="metric"><span>Volume change vs prior capture</span><strong>${momentum.volume_change_pct == null ? "insufficient history" : `${momentum.volume_change_pct.toFixed(2)}%`}</strong></div></div><h3>Chain and contract</h3>${identity(item)}<h3>Recent About this coin headlines</h3>${headlineTop.length ? `<ul class="headlines">${headlineTop.map(row => `<li><a href="${escapeHtml(row.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(row.title)}</a><span>${ageAt(row.published_at_utc)}</span></li>`).join("")}</ul>` : `<p class="muted">No dated, relevant headline links.</p>`}<div class="mention-grid">${mention(item.mentions?.google_news, "Google News", item.name)}${mention(item.mentions?.reddit, "Reddit sitewide", item.name)}</div><h3>Address matched DEX pairs</h3>${pairContent}<h3>FOMO watch | observations only</h3><p class="muted">${escapeHtml(fomo.disclaimer || "Unknown data stays unknown; observations do not affect score or direction.")}</p>${observations ? `<ul class="fomo-observations">${observations}</ul>` : `<p class="muted">${escapeHtml(fomo.status || "UNKNOWN").replaceAll("_", " ")}; no observation recorded.</p>`}</div></details>`;
   }).join("") : `<p class="muted">Social sources are unavailable or still refreshing.</p>`;
+  if (social.live_capture_at_utc) {
+    document.querySelectorAll("#social-items .hype-card").forEach((card, index) => {
+      const item = items[index];
+      const history = card.querySelector(".card-history");
+      if (history) history.textContent = `${history.textContent.split(" | captured")[0]} | momentum since background capture ${item?.background_capture_at_utc ? new Date(item.background_capture_at_utc).toLocaleString() : "not available"} | live values captured ${new Date(social.live_capture_at_utc).toLocaleString()}`;
+      card.querySelectorAll(".metrics .metric span").forEach(label => { if (/^(CoinGecko price|Market cap|24h volume|Volume \/ market cap|CoinGecko 24h change|DEX primary pair)/.test(label.textContent)) label.textContent += " (live)"; });
+      const watchHeading = [...card.querySelectorAll("h3")].find(heading => heading.textContent.includes("FOMO watch"));
+      if (watchHeading) watchHeading.textContent = "FOMO watch | live observations only";
+    });
+  }
   document.querySelectorAll(".copy-address").forEach(button => button.addEventListener("click", async () => { try { await navigator.clipboard.writeText(button.dataset.address); button.textContent = "Copied"; } catch { button.textContent = "Copy unavailable"; } }));
   document.querySelectorAll(".pair-chain").forEach(select => select.addEventListener("change", () => {
     const item = items.find(row => row.coingecko_id === select.dataset.coinId);
@@ -446,14 +435,209 @@ function artifactRefreshReport() {
   return {fresh, total: entries.length, failures};
 }
 
-async function loadHype() {
-  try {
-    hypeSnapshot = await fetchFreshJson("data/social-context-v2-latest.json");
-  } catch {
-    hypeSnapshot = null;
-  }
-  renderHype(hypeSnapshot);
+function attentionNumber(value) {
+  if (value == null || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
+
+function calculateAttentionMomentum(previousRank, currentRank, previousVolume, currentVolume, rules, hasValidHistory = true) {
+  const band = attentionNumber(rules?.momentum?.volume_noise_band_percent_inclusive);
+  const priorRank = attentionNumber(previousRank), liveRank = attentionNumber(currentRank);
+  const priorVolume = attentionNumber(previousVolume), liveVolume = attentionNumber(currentVolume);
+  const ranksValid = priorRank != null && liveRank != null;
+  const volumesValid = priorVolume != null && priorVolume > 0 && liveVolume != null && band != null;
+  if (!hasValidHistory || !ranksValid || !volumesValid) return {state: "INSUFFICIENT_HISTORY", rank_change: null, volume_change_pct: null};
+  const rankChange = priorRank - liveRank;
+  const volumeChange = ((liveVolume - priorVolume) / priorVolume) * 100;
+  const rankDirection = Math.sign(rankChange);
+  const volumeDirection = volumeChange > band ? 1 : volumeChange < -band ? -1 : 0;
+  const state = rankDirection && volumeDirection && rankDirection !== volumeDirection ? "MIXED" : rankDirection > 0 || (rankDirection === 0 && volumeDirection > 0) ? "RISING" : rankDirection < 0 || (rankDirection === 0 && volumeDirection < 0) ? "FADING" : "FLAT";
+  return {state, rank_change: rankChange, volume_change_pct: volumeChange};
+}
+
+function evaluateAttentionRules(item, rules, priorItem = null) {
+  const parameters = rules?.observations || {};
+  const liquidityField = rules?.primary_pair?.liquidity_field || "liquidity_usd";
+  const pairs = (item?.dex_pairs || []).filter(pair => attentionNumber(pair[liquidityField]) != null)
+    .sort((left, right) => attentionNumber(right[liquidityField]) - attentionNumber(left[liquidityField]));
+  const primaryPair = pairs[0] || null;
+  const observations = [];
+  const market = item?.market || {};
+  const pairAgeRule = parameters.pair_under_24h || {};
+  const liquidityRule = parameters.liquidity_under_value || {};
+  const imbalanceRule = parameters.buy_sell_imbalance || {};
+  const pressureRule = parameters.selling_pressure || {};
+  const moveRule = parameters.dex_price_move || {};
+  const volumeRule = parameters.volume_above_market_cap || {};
+  const pairIdentity = pair => ({pair_address: pair.pair_address, dex_id: pair.dex_id});
+  const pairSource = pair => `${pair.dex_id || "DEX"} DEX Screener`;
+  for (const pair of item?.dex_pairs || []) {
+    const isPrimary = pair === primaryPair;
+    const identity = pairIdentity(pair);
+    const source = pairSource(pair);
+    const age = attentionNumber(pair.age_seconds);
+    if (pairAgeRule.primary_pair_only && isPrimary && age != null && age < Number(pairAgeRule.max_age_seconds_exclusive)) observations.push({kind: pairAgeRule.kind, source, age_seconds: age, pair_age_seconds: age, ...identity});
+    if (isPrimary) {
+      const denominator = (liquidityRule.denominator_priority || []).map(field => attentionNumber(field === "coingecko_market_cap_usd" ? market.market_cap_usd : pair[field])).find(value => value != null);
+      const liquidity = attentionNumber(pair.liquidity_usd);
+      const ratioPct = denominator > 0 && liquidity != null ? liquidity / denominator * 100 : NaN;
+      if (Number.isFinite(ratioPct) && ratioPct < Number(liquidityRule.ratio_percent_exclusive)) observations.push({kind: liquidityRule.kind, source, age_seconds: pair.age_seconds ?? null, liquidity_usd: liquidity, ratio_pct: ratioPct, fdv_or_market_cap_usd: denominator, ...identity});
+      const tx = pair.buys_sells_by_period?.[imbalanceRule.period] || {};
+      const buys = attentionNumber(tx.buys), sells = attentionNumber(tx.sells);
+      if (buys != null && sells != null && Math.min(buys, sells) >= 0 && Math.max(buys, sells) >= Number(imbalanceRule.minimum_larger_side_transactions_inclusive)) {
+        const buyDenominator = Math.max(Number(imbalanceRule.minimum_smaller_side_denominator), sells);
+        if ((!imbalanceRule.primary_pair_only || isPrimary) && buys / buyDenominator >= Number(imbalanceRule.ratio_inclusive)) observations.push({kind: imbalanceRule.kind, source: `${source} 24h transactions`, age_seconds: pair.age_seconds ?? null, buys_24h: buys, sells_24h: sells, ...identity});
+        const sellDenominator = Math.max(Number(pressureRule.minimum_smaller_side_denominator), buys);
+        if ((!pressureRule.primary_pair_only || isPrimary) && sells / sellDenominator >= Number(pressureRule.ratio_inclusive)) observations.push({kind: pressureRule.kind, source: `${source} 24h transactions`, age_seconds: pair.age_seconds ?? null, buys_24h: buys, sells_24h: sells, ...identity});
+      }
+      const move = attentionNumber(pair.price_change_by_period?.[moveRule.period]);
+      if (moveRule.primary_pair_only && move != null && Math.abs(move) > Number(moveRule.absolute_percent_exclusive)) observations.push({kind: moveRule.kind, source: `${source} 24h price move`, age_seconds: pair.age_seconds ?? null, change_24h_pct: move, ...identity});
+    } else if (!pressureRule.primary_pair_only) {
+      const tx = pair.buys_sells_by_period?.[pressureRule.period] || {};
+      const buys = attentionNumber(tx.buys), sells = attentionNumber(tx.sells);
+      if (buys != null && sells != null && Math.min(buys, sells) >= 0 && Math.max(buys, sells) >= Number(pressureRule.minimum_larger_side_transactions_inclusive)) {
+        const denominator = Math.max(Number(pressureRule.minimum_smaller_side_denominator), buys);
+        if (sells / denominator >= Number(pressureRule.ratio_inclusive)) observations.push({kind: pressureRule.kind, source: `${source} 24h transactions`, age_seconds: pair.age_seconds ?? null, buys_24h: buys, sells_24h: sells, ...identity});
+      }
+    }
+  }
+  const volume = attentionNumber(market.volume_24h_usd), cap = attentionNumber(market.market_cap_usd);
+  if (volume != null && cap != null && (volumeRule.comparison === "strictly_greater" ? volume > cap : false)) observations.push({kind: volumeRule.kind, source: "CoinGecko 24h volume and market cap", age_seconds: 0, volume_24h_usd: volume, market_cap_usd: cap});
+  const priorRank = priorItem?.trending?.rank;
+  const currentRank = item?.trending?.rank;
+  const momentum = calculateAttentionMomentum(priorRank, currentRank, priorItem?.market?.volume_24h_usd, market.volume_24h_usd, rules, Boolean(priorItem?.observed_at_utc));
+  return {primaryPair, observations, momentum};
+}
+
+window.evaluateAttentionRules = evaluateAttentionRules;
+window.calculateAttentionMomentum = calculateAttentionMomentum;
+window.primaryHypePair = primaryPair;
+
+function knownContracts(item) {
+  return (item?.identity?.contracts || []).filter(contract => contract.dex_chain && HYPE_SUPPORTED_CHAINS.has(contract.chain) && !["MALFORMED", "UNVERIFIED_FORMAT"].includes(contract.status) && typeof contract.address === "string" && contract.address.trim());
+}
+
+function pairFromDex(pair, contract, capturedAt) {
+  const created = pair.pairCreatedAt ? new Date(Number(pair.pairCreatedAt)).toISOString() : null;
+  const ageSeconds = created ? Math.max(0, (Date.parse(capturedAt) - Date.parse(created)) / 1000) : null;
+  const liquidity = liveNumeric(pair.liquidity?.usd);
+  return {
+    chain: pair.chainId || contract.chain, coingecko_platform: contract.chain, token_address: contract.address,
+    pair_address: pair.pairAddress, pair_url: pair.url || null, dex_id: pair.dexId || "DEX",
+    pair_created_at_utc: created, age_seconds: ageSeconds, liquidity_usd: Number.isFinite(liquidity) ? liquidity : null,
+    fdv_usd: liveNumeric(pair.fdv),
+    market_cap_usd: liveNumeric(pair.marketCap),
+    price_change_by_period: {h24: liveNumeric(pair.priceChange?.h24)},
+    volume_by_period: {h24: liveNumeric(pair.volume?.h24)},
+    buys_sells_by_period: {h24: pair.txns?.h24 ? {buys: liveNumeric(pair.txns.h24.buys), sells: liveNumeric(pair.txns.h24.sells)} : {}},
+    captured_at_utc: capturedAt,
+  };
+}
+
+function liveNumeric(value) {
+  if (value == null || value === "") return null;
+  const parsed = Number(String(value).replace(/[$,]/g, ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function liveCoinView(liveCoin, rank, artifact, capturedAt, rules) {
+  const data = liveCoin.data || {};
+  const market = {
+    ...(artifact?.market || {}), captured_at_utc: capturedAt,
+    price_usd: liveNumeric(data.price),
+    market_cap_usd: liveNumeric(data.market_cap),
+    volume_24h_usd: liveNumeric(data.total_volume),
+    change_24h_pct: liveNumeric(data.price_change_percentage_24h?.usd),
+    change_24h_source: "CoinGecko live",
+  };
+  const next = artifact ? structuredClone(artifact) : {
+    coingecko_id: liveCoin.id, name: liveCoin.name || "Unknown coin", symbol: liveCoin.symbol || "?", identity: {status: "UNKNOWN", contracts: []},
+    mentions: {google_news: {status: "NOT_QUERIED", headlines: []}, reddit: {status: "NOT_QUERIED", headlines: []}}, dex_pairs: [], fomo_watch: {disclaimer: "Descriptive observations only; no score, direction, or trade gate."},
+  };
+  next.name = liveCoin.name || next.name;
+  next.symbol = liveCoin.symbol || next.symbol;
+  next.market = market;
+  next.dex_pairs = [];
+  next.trending = {rank, previous_rank: artifact?.trending?.rank ?? null, change: artifact?.trending?.rank == null ? null : artifact.trending.rank - rank, state: "INSUFFICIENT_HISTORY", window: "live since background capture"};
+  const computed = evaluateAttentionRules(next, rules, artifact);
+  next.momentum = {...computed.momentum, state: artifact ? computed.momentum.state : "NEW_SINCE_PRIOR_CAPTURE", comparison_at_utc: artifact?.observed_at_utc || null};
+  next.fomo_watch = {status: computed.observations.length ? "WATCH_ONLY" : "UNKNOWN", disclaimer: artifact?.fomo_watch?.disclaimer || "Descriptive observations only; no score, direction, or trade gate.", primary_pair: computed.primaryPair ? {pair_address: computed.primaryPair.pair_address, dex_id: computed.primaryPair.dex_id} : null, observations: computed.observations};
+  next.observed_at_utc = capturedAt;
+  next.live_capture_at_utc = capturedAt;
+  next.background_capture_at_utc = artifact?.observed_at_utc || null;
+  next.address_checked_live = Boolean(artifact && knownContracts(artifact).length);
+  next.unmatched_live = !artifact;
+  next.market.volume_market_cap_ratio = market.market_cap_usd > 0 ? market.volume_24h_usd / market.market_cap_usd : null;
+  return next;
+}
+
+async function refreshHype({force = false} = {}) {
+  if (hypeRefreshPromise) return hypeRefreshPromise;
+  const elapsed = Date.now() - lastHypeRefreshStartedAt;
+  if (!force && lastHypeRefreshStartedAt && elapsed < HYPE_REFRESH_MIN_MS) {
+    const remaining = Math.ceil((HYPE_REFRESH_MIN_MS - elapsed) / 1000);
+    const ago = Math.floor(elapsed / 1000);
+    $("#hype-refresh-status").textContent = `Refreshed ${ago}s ago, try again in ${remaining}s`;
+    return Promise.resolve({throttled: true});
+  }
+  lastHypeRefreshStartedAt = Date.now();
+  const button = $("#hype-refresh-button");
+  button.disabled = true;
+  button.textContent = "Refreshing…";
+  $("#hype-refresh-status").textContent = "Refreshing Hype data…";
+  hypeRefreshPromise = (async () => {
+    try {
+      const artifact = await fetchFreshJson("data/social-context-v2-latest.json");
+      hypeSnapshot = artifact;
+      try {
+        const rules = await fetchFreshJson("data/attention-rules.json", {retryAttempts: 1});
+        if (rules.schema !== "market-attention-rules.v1") throw new Error("unsupported rule table schema");
+        hypeRules = rules;
+      } catch (error) { renderHype(artifact, {failure: `attention rules ${error.message || error}`}); $("#hype-refresh-status").textContent = `Live refresh failed (attention rules: ${error.message || error}); showing background capture`; return {error}; }
+      const trending = await fetchFreshJson(COINGECKO_TRENDING_URL, {retryAttempts: 1});
+      if (!Array.isArray(trending.coins)) throw new Error("CoinGecko trending response was invalid");
+      const liveAt = new Date().toISOString();
+      const artifacts = new Map((artifact.items || []).map(item => [item.coingecko_id, item]));
+      const liveCoins = trending.coins.map(row => row.item).filter(row => row?.id);
+      const views = liveCoins.map((coin, index) => liveCoinView(coin, index + 1, artifacts.get(coin.id) || null, liveAt, hypeRules));
+      for (const view of views) {
+        const artifactItem = artifacts.get(view.coingecko_id);
+        if (!artifactItem) continue;
+        const contracts = knownContracts(artifactItem);
+        for (const contract of contracts) {
+          const url = `${DEX_TOKEN_PAIRS_URL}/${encodeURIComponent(contract.dex_chain)}/${encodeURIComponent(contract.address)}`;
+          const response = await fetchFreshJson(url, {retryAttempts: 1});
+          if (!Array.isArray(response)) throw new Error("DEX Screener returned an invalid token-pairs response");
+          const liveContract = (view.identity?.contracts || []).find(row => row.chain === contract.chain && row.address === contract.address);
+          if (liveContract) { liveContract.dex_status = "FRESH"; liveContract.dex_error_class = null; }
+          view.dex_pairs.push(...response.map(pair => pairFromDex(pair, contract, liveAt)).filter(pair => pair.pair_address));
+        }
+        const computed = evaluateAttentionRules(view, hypeRules, artifactItem);
+        view.momentum = {...computed.momentum, comparison_at_utc: artifactItem.observed_at_utc || artifact.captured_at_utc};
+        view.fomo_watch = {status: computed.observations.length ? "WATCH_ONLY" : "UNKNOWN", disclaimer: artifactItem.fomo_watch?.disclaimer || "Descriptive observations only; no score, direction, or trade gate.", primary_pair: computed.primaryPair ? {pair_address: computed.primaryPair.pair_address, dex_id: computed.primaryPair.dex_id} : null, observations: computed.observations};
+        view.address_checked_live = contracts.length > 0;
+      }
+      const liveSnapshot = {...artifact, items: views, live_capture_at_utc: liveAt, background_capture_at_utc: artifact.captured_at_utc};
+      hypeLiveAt = liveAt;
+      lastHypeRefreshFinishedAt = new Date();
+      renderHype(liveSnapshot, {liveAt});
+      $("#hype-refresh-status").textContent = `Updated live ${new Date(liveAt).toLocaleTimeString([], {hour: "numeric", minute: "2-digit", second: "2-digit"})}`;
+      return {liveAt, count: views.length};
+    } catch (error) {
+      renderHype(hypeSnapshot, {failure: `live refresh ${error.message || error}`});
+      $("#hype-refresh-status").textContent = `Live refresh failed (${error.message || error}); showing background capture`;
+      return {error};
+    } finally {
+      button.disabled = false;
+      button.textContent = "Refresh";
+      hypeRefreshPromise = null;
+    }
+  })();
+  return hypeRefreshPromise;
+}
+
+async function loadHype() { return refreshHype(); }
 
 async function refreshAllLiveQuotes() {
   const targets = Object.values(snapshotsByMode);
@@ -682,6 +866,8 @@ async function boot({manual = false} = {}) {
 
 $("#search-button").addEventListener("click", () => analyze($("#coin-search").value));
 $("#coin-search").addEventListener("keydown", event => { if (event.key === "Enter") analyze(event.target.value); });
+$("#hype-refresh-button").addEventListener("click", () => refreshHype());
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refreshHype(); });
 $("#refresh-button").addEventListener("click", () => boot({manual: true}));
 $("#deep-scan-button").addEventListener("click", runDeepScan);
 document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => { activeMode = tab.dataset.mode; document.querySelectorAll(".tab").forEach(item => { const selected = item === tab; item.classList.toggle("active", selected); item.setAttribute("aria-selected", String(selected)); }); $("#horizon-label").textContent = modeConfig[activeMode]?.eyebrow || "LONG-TERM HORIZON"; if (snapshotsByMode[activeMode] && liveFreshness(snapshotsByMode[activeMode]).ok) { snapshot = snapshotsByMode[activeMode]; render(); } else { boot(); } }));

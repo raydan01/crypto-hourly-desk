@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import json
+import importlib
+import io
+import shutil
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -367,13 +371,19 @@ def _assert_public_capture_guard(artifact: dict) -> None:
                 check_keys(child)
 
     check_keys(artifact)
+    def canonical_item_set(items):
+        # Canonical JSON strings preserve duplicate rows while removing order as a factor.
+        return sorted(json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False) for item in items)
+
+    artifact_items = canonical_item_set(artifact["items"])
     for fixture in FIXTURES.rglob("*.json"):
         try:
             candidate = json.loads(fixture.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
         if isinstance(candidate, dict) and "captured_at_utc" in candidate and isinstance(candidate.get("items"), list):
-            assert (artifact.get("captured_at_utc"), artifact["items"]) != (candidate.get("captured_at_utc"), candidate["items"]), fixture
+            exact_capture = artifact.get("captured_at_utc") == candidate.get("captured_at_utc") and artifact_items == canonical_item_set(candidate["items"])
+            assert not exact_capture, fixture
 
 
 def test_committed_public_social_capture_is_no_data_and_not_fixture_content():
@@ -387,6 +397,10 @@ def test_committed_public_social_capture_is_no_data_and_not_fixture_content():
     _assert_public_capture_guard(real_capture)
     with pytest.raises(AssertionError):
         _assert_public_capture_guard(recorded)
+    reordered_fixture = json.loads(json.dumps(recorded))
+    reordered_fixture["items"].reverse()
+    with pytest.raises(AssertionError):
+        _assert_public_capture_guard(reordered_fixture)
 
 
 def test_hourly_script_entrypoint_replays_recorded_provider_boundaries(tmp_path, monkeypatch):
@@ -434,8 +448,71 @@ def test_hourly_script_entrypoint_replays_recorded_provider_boundaries(tmp_path,
     assert payload["market_data_source"] == "Kraken public Ticker"
 
 
+def test_production_default_hourly_entrypoint_runs_from_clean_clone(monkeypatch):
+    """Exercise normal module paths and outputs from a disposable workspace clone."""
+    clone = ROOT / ".test-tmp" / f"production-default-{uuid.uuid4().hex}"
+    clone.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(ROOT, clone, ignore=shutil.ignore_patterns(".git", ".test-tmp", ".proof", "__pycache__", "*.pyc"))
+    module_names = [name for name in sys.modules if name == "refresh_hourly" or name == "social_context" or name == "research" or name.startswith("research.")]
+    previous_modules = {name: sys.modules.pop(name) for name in module_names}
+    monkeypatch.syspath_prepend(str(clone))
+    importlib.invalidate_caches()
+    try:
+        hourly = importlib.import_module("refresh_hourly")
+        collector = importlib.import_module("social_context")
+
+        class RecordedResponse(io.BytesIO):
+            status = 200
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        def urlopen_boundary(request, timeout=None):
+            url = request.full_url
+            if "/AssetPairs" in url:
+                body = {"error": [], "result": {"XXBTZUSD": {"status": "online", "wsname": "BTC/USD", "altname": "XBTUSD"}}}
+            elif "/Ticker" in url:
+                body = {"error": [], "result": {"XXBTZUSD": {"b": ["59999"], "a": ["60001"], "c": ["60000"], "v": ["0", "100"], "o": "59000", "h": ["0", "61000"], "l": ["0", "58000"]}}}
+            else:
+                status, content = replay_response(url, request.headers.get("Accept", "application/json"))
+                if status != 200:
+                    response = RecordedResponse(content)
+                    response.status = status
+                    return response
+                return RecordedResponse(content)
+            return RecordedResponse(json.dumps(body).encode("utf-8"))
+
+        monkeypatch.setattr(hourly, "urlopen", urlopen_boundary)
+        monkeypatch.setattr(collector, "urlopen", urlopen_boundary)
+        monkeypatch.setattr(collector.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(collector.time, "monotonic", lambda: 100.0)
+        result = hourly.main()
+        hourly_path = clone / "data" / "market-opportunities-hourly-latest.json"
+        social_path = clone / "data" / "social-context-v2-latest.json"
+        market = json.loads(hourly_path.read_text(encoding="utf-8"))
+        social = json.loads(social_path.read_text(encoding="utf-8"))
+        assert result["market_data_source"] == "Kraken public Ticker"
+        assert market["social_context"]["schema_version"] == "social-context.v2"
+        assert social["schema_version"] == "social-context.v2"
+        assert social["status"] in {"READY", "DEGRADED"}
+        assert hourly_path.exists() and social_path.exists()
+        assert collector.ROOT == clone
+        assert collector.V2_PATH == social_path
+    finally:
+        for name in [name for name in sys.modules if name == "refresh_hourly" or name == "social_context" or name == "research" or name.startswith("research.")]:
+            sys.modules.pop(name, None)
+        sys.modules.update(previous_modules)
+        shutil.rmtree(clone, ignore_errors=True)
+
+
 def test_v1_reader_compatibility_and_market_only_score():
-    legacy = json.loads((ROOT / "data" / "market-opportunities-hourly-latest.json").read_text(encoding="utf-8"))["social_context"]
+    current = json.loads((ROOT / "data" / "market-opportunities-hourly-latest.json").read_text(encoding="utf-8"))
+    legacy = json.loads(json.dumps(current["social_context"]))
+    legacy["schema_version"] = "social-context.v1"
     assert legacy["schema_version"] == "social-context.v1"
     market = {"metrics": {"change_24h_pct": 0.1, "spread_bps": 1, "volume_24h_quote": 1_000_000, "volatility_24h": 0.04}}
     no_social = score_candidate(market)
@@ -471,7 +548,9 @@ def test_public_bundle_and_hourly_workflow_include_v2_without_private_data():
     workflow = (ROOT / ".github" / "workflows" / "refresh-hourly.yml").read_text(encoding="utf-8")
     assert "crypto-hourly-desk-v10-hype-v4" in worker
     assert "social-context-v2-latest.json" in worker
-    assert "git add data/social-context-v2-latest.json" in workflow
+    add_commands = [line.strip() for line in workflow.splitlines() if line.strip().startswith("git add")]
+    assert add_commands == ["git add -- data/market-opportunities-hourly-latest.json data/social-context-v2-latest.json"]
+    assert "schedule:" not in workflow
     public_files = [ROOT / name for name in ("index.html", "app.js", "styles.css", "manifest.json", "service-worker.js")]
     public_files += list((ROOT / "data").glob("*.json"))
     public_text = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in public_files)

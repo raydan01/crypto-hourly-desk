@@ -1,0 +1,286 @@
+﻿[CmdletBinding()]
+param(
+    [string]$InstallRoot = 'C:\HypeDesk',
+    [switch]$DryRun,
+    [switch]$TestMode,
+    [string]$PythonPath = 'C:\CryptoScope\tools\python-3.14\python.exe',
+    [string]$TestRefreshScript,
+    [string]$TestRemoteAdvanceScript,
+    [string]$TestRemoteClonePath
+)
+$ErrorActionPreference = 'Stop'
+$script:NativeModule = Join-Path $PSScriptRoot 'HypeDesk.Native.psm1'
+Import-Module -Name $script:NativeModule -Force -ErrorAction Stop
+$AllowedPaths = @('data/market-opportunities-hourly-latest.json', 'data/social-context-v2-latest.json')
+$TaskName = 'MarketAttention-HypeDesk-Hourly'
+$ScriptRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+
+function Resolve-GitExecutable([object[]]$Candidates = $null) {
+    if ($null -eq $Candidates) { $Candidates = @(Get-Command git -CommandType Application -ErrorAction SilentlyContinue) }
+    if (-not $Candidates -or $Candidates.Count -eq 0) { throw 'PREFLIGHT_FAILED Git executable was not found.' }
+    $commands = @($Candidates | Where-Object { $_.Source })
+    if ($commands.Count -eq 0) { throw 'PREFLIGHT_FAILED Git executable was not found.' }
+    $preferred = @($commands | Where-Object { ([string]$_.Source) -match '(?i)\\cmd\\git\.exe$' } | Select-Object -First 1)
+    if ($preferred.Count -gt 0) { return [string]$preferred[0].Source }
+    return [string]$commands[0].Source
+}
+
+function Write-JobLog([string]$Message) {
+    $Message = [regex]::Replace($Message, '(?i)(https?://)[^/@\s]+@', '$1[REDACTED]@')
+    if ($Message -match '(?i)credential') { $Message = '[credential helper output suppressed]' }
+    $stamp = [DateTime]::UtcNow.ToString('o')
+    $line = "$stamp $Message"
+    Write-Output $line
+    if ($script:LogPath -and (Test-Path -LiteralPath $script:LogPath)) {
+        $file = Get-Item -LiteralPath $script:LogPath
+        if ($file.Length -ge 2MB) {
+            for ($n = 4; $n -ge 1; $n--) {
+                $from = "$($script:LogPath).$n"
+                $to = "$($script:LogPath).$($n + 1)"
+                if (Test-Path -LiteralPath $from) { Move-Item -LiteralPath $from -Destination $to -Force }
+            }
+            Move-Item -LiteralPath $script:LogPath -Destination "$($script:LogPath).1" -Force
+        }
+    }
+    if ($script:LogPath) {
+        $writer = New-Object System.IO.StreamWriter($script:LogPath, $true, (New-Object System.Text.UTF8Encoding($false)))
+        try { $writer.WriteLine($line) } finally { $writer.Dispose() }
+    }
+}
+function Write-Utf8NoBom([string]$Path, [string]$Text) {
+    [IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
+}
+function Invoke-Git([string[]]$GitArgs) {
+    $result = Invoke-Native -FilePath $script:GitExe -ArgumentList (@('-C', $script:RepoPath) + $GitArgs) -WorkingDirectory $script:RepoPath
+    if ($result.ExitCode -ne 0) { throw "git $($GitArgs -join ' ') failed (exit $($result.ExitCode)); command output suppressed to protect credential-bearing remote configuration." }
+    return @($result.StdOut -split "`r?`n" | Where-Object { $_ -ne '' })
+}
+function Get-CaptureTime([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Required artifact missing: $([IO.Path]::GetFileName($Path))" }
+    $captureCode = "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8-sig')); print(d.get('captured_at_utc') or d.get('market_data_captured_at_utc') or d.get('generated_at_utc') or '')"
+    $fieldResult = Invoke-Native -FilePath $script:PythonPath -ArgumentList @('-c', $captureCode, $Path) -WorkingDirectory $script:RepoPath
+    $field = $fieldResult.StdOut
+    if ($fieldResult.ExitCode -ne 0 -or -not $field) { throw "Artifact has no valid capture field (exit $($fieldResult.ExitCode)): $([IO.Path]::GetFileName($Path))" }
+    $parsed = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse(([string]$field).Trim(), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsed)) {
+        throw "Invalid artifact capture time: $([IO.Path]::GetFileName($Path))"
+    }
+    return $parsed.ToUniversalTime()
+}
+function Assert-ArtifactSchemas {
+    $marketPath = Join-Path $script:RepoPath $AllowedPaths[0]
+    $socialPath = Join-Path $script:RepoPath $AllowedPaths[1]
+    $code = @'
+import datetime, json, sys
+def require(ok, message):
+    if not ok: raise ValueError(message)
+def stamp(value):
+    require(isinstance(value, str) and value, 'missing capture timestamp')
+    datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
+def flags(value):
+    require(value.get('research_only') is True and value.get('trade_authorization') is False and value.get('execution_allowed') is False, 'research-only safety flags invalid')
+market = json.load(open(sys.argv[1], encoding='utf-8-sig'))
+social = json.load(open(sys.argv[2], encoding='utf-8-sig'))
+require(market.get('schema_version') == 'market-opportunities.v1', 'unsupported market artifact schema')
+require(market.get('status') in ('READY', 'DEGRADED'), 'invalid market artifact status')
+flags(market)
+stamp(market.get('generated_at_utc'))
+stamp(market.get('market_data_captured_at_utc'))
+require(isinstance(market.get('market_data_source'), str) and market['market_data_source'], 'missing market source')
+require(isinstance(market.get('candidates'), list) and all(isinstance(x, dict) for x in market['candidates']), 'invalid market candidates')
+nested = market.get('social_context')
+require(isinstance(nested, dict) and nested.get('schema_version') == 'social-context.v2', 'invalid embedded social context')
+require(social.get('schema_version') == 'social-context.v2', 'unsupported social artifact schema')
+require(social.get('status') in ('READY', 'DEGRADED'), 'invalid social artifact status')
+flags(social)
+stamp(social.get('captured_at_utc'))
+require(isinstance(social.get('items'), list) and isinstance(social.get('source_health'), dict), 'invalid social item/health containers')
+required = {'coin_count_24h','coin_count_7d','related_count_24h','related_count_7d','listing_count_7d','headlines','related_headlines'}
+for item in social['items']:
+    mentions = item.get('mentions') if isinstance(item, dict) else None
+    require(isinstance(mentions, dict), 'invalid social item mentions')
+    for source in ('google_news','reddit'):
+        mention = mentions.get(source)
+        require(isinstance(mention, dict) and required.issubset(mention), 'invalid social mention fields')
+        require(all(isinstance(mention[k], list) and len(mention[k]) <= 3 for k in ('headlines','related_headlines')), 'invalid social headline lists')
+        for key in ('coin_count_24h','coin_count_7d','related_count_24h','related_count_7d','listing_count_7d'):
+            count = mention[key]
+            if mention.get('status') == 'FRESH': require(isinstance(count, int) and not isinstance(count, bool) and count >= 0, 'invalid fresh mention count')
+            else: require(count is None, 'non-fresh mention counts must be null')
+'@
+    $validation = Invoke-Native -FilePath $script:PythonPath -ArgumentList @('-c', $code, $marketPath, $socialPath) -WorkingDirectory $script:RepoPath
+    if ($validation.ExitCode -ne 0) { throw "Artifact schema validation failed (exit $($validation.ExitCode)); collector output was rejected." }
+}
+function Assert-AllowedChanges {
+    $changes = Invoke-Git @('status', '--porcelain', '--untracked-files=all')
+    foreach ($line in $changes) {
+        if ($line.Length -lt 4) { throw 'Could not parse Git status output' }
+        $path = $line.Substring(3).Replace('\', '/')
+        if ($path -match ' -> ') { $path = ($path -split ' -> ')[-1] }
+        if ($AllowedPaths -notcontains $path) { throw "Unexpected changed path; refusing publication: $path" }
+    }
+    $staged = Invoke-Git @('diff', '--cached', '--name-only')
+    foreach ($path in $staged) {
+        if ($AllowedPaths -notcontains $path.Replace('\', '/')) { throw "Unexpected staged path; refusing publication: $path" }
+    }
+}
+function Save-Status([string]$State, [string]$Detail, [string]$RemoteRef = '') {
+    $obj = [ordered]@{ updated_at_utc = [DateTime]::UtcNow.ToString('o'); state = $State; detail = $Detail; remote_ref = $RemoteRef; local_commit = $script:LocalCommit; dry_run = [bool]$DryRun }
+    $tmp = "$script:StatusPath.tmp"
+    Write-Utf8NoBom $tmp (ConvertTo-Json -InputObject $obj -Depth 4)
+    Move-Item -LiteralPath $tmp -Destination $script:StatusPath -Force
+}
+function Get-Head([string]$Ref) { return ((Invoke-Git @('rev-parse', $Ref)) -join '').Trim() }
+function Assert-ApprovedOrigin {
+    $fetchUrls = @(Invoke-Git @('remote', 'get-url', '--all', 'origin') | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    $pushUrls = @(Invoke-Git @('remote', 'get-url', '--push', '--all', 'origin') | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    $pushConfig = Invoke-Native -FilePath $script:GitExe -ArgumentList @('-C', $script:RepoPath, 'config', '--get-all', 'remote.origin.pushurl') -WorkingDirectory $script:RepoPath
+    if ($pushConfig.ExitCode -gt 1) { throw "PREFLIGHT_FAILED repository remote configuration could not be validated (exit $($pushConfig.ExitCode))." }
+    $configuredPushUrls = @($pushConfig.StdOut -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($TestMode) {
+        if ($fetchUrls.Count -eq 0 -or $pushUrls.Count -eq 0) { throw 'PREFLIGHT_FAILED TestMode fetch and push remotes must be configured.' }
+        foreach ($remoteUrl in @($fetchUrls) + @($pushUrls) + @($configuredPushUrls)) {
+            try { $testOrigin = [IO.Path]::GetFullPath($remoteUrl) } catch { throw 'PREFLIGHT_FAILED disposable remote is invalid.' }
+            if (-not $testOrigin.StartsWith($expectedTestRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $testOrigin -PathType Container)) { throw 'PREFLIGHT_FAILED TestMode fetch and push remotes must use the same disposable remote under repo/.test-tmp.' }
+        }
+        if (($fetchUrls | Select-Object -Unique).Count -ne 1 -or ($pushUrls | Select-Object -Unique).Count -ne 1 -or $fetchUrls[0] -ne $pushUrls[0]) { throw 'PREFLIGHT_FAILED TestMode fetch and push remotes must match.' }
+        return
+    }
+    $approvedPattern = '^https://github\.com/raydan01/crypto-hourly-desk(?:\.git)?$'
+    if ($fetchUrls.Count -eq 0 -or $pushUrls.Count -eq 0 -or @($fetchUrls + $pushUrls | Where-Object { $_ -notmatch $approvedPattern }).Count -gt 0) { throw 'PREFLIGHT_FAILED repository fetch or push URL does not match the approved Market Attention repository.' }
+    if (@($configuredPushUrls | Where-Object { $_ -notmatch $approvedPattern }).Count -gt 0) { throw 'PREFLIGHT_FAILED configured push URL does not match the approved Market Attention repository.' }
+    if (($fetchUrls | Select-Object -Unique).Count -ne 1 -or ($pushUrls | Select-Object -Unique).Count -ne 1) { throw 'PREFLIGHT_FAILED repository must have one approved fetch URL and one approved push URL.' }
+}
+
+$resolvedRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
+$testMarker = '\.test-tmp'
+$testMarkerIndex = $ScriptRoot.IndexOf($testMarker, [StringComparison]::OrdinalIgnoreCase)
+if ($testMarkerIndex -ge 0) { $expectedTestRoot = $ScriptRoot.Substring(0, $testMarkerIndex + $testMarker.Length) }
+else { $expectedTestRoot = Join-Path $ScriptRoot '.test-tmp' }
+$expectedTestRoot = [IO.Path]::GetFullPath($expectedTestRoot).TrimEnd('\')
+if ($TestMode) {
+    if (($resolvedRoot -ne $expectedTestRoot) -and -not $resolvedRoot.StartsWith($expectedTestRoot + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'TestMode root must be a disposable path under repo/.test-tmp.' }
+    if (-not $TestRefreshScript) { throw 'TestMode requires -TestRefreshScript.' }
+    $TestRefreshScript = [IO.Path]::GetFullPath($TestRefreshScript)
+    if (-not $TestRefreshScript.StartsWith($expectedTestRoot + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Test refresh script must be beneath repo/.test-tmp.' }
+    if ($TestRemoteAdvanceScript) {
+        $TestRemoteAdvanceScript = [IO.Path]::GetFullPath($TestRemoteAdvanceScript)
+        if (-not $TestRemoteAdvanceScript.StartsWith($expectedTestRoot + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Test remote-advance script must be beneath repo/.test-tmp.' }
+        if (-not $TestRemoteClonePath -or -not ([IO.Path]::GetFullPath($TestRemoteClonePath)).StartsWith($expectedTestRoot + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Test remote clone must be beneath repo/.test-tmp.' }
+    }
+} elseif ($resolvedRoot -ne 'C:\HypeDesk') {
+    throw 'Production install root is fixed at C:\HypeDesk.'
+}
+$script:RepoPath = Join-Path $resolvedRoot 'repo'
+if (-not (Test-Path -LiteralPath $script:RepoPath -PathType Container)) { throw "Dedicated clone is missing: $script:RepoPath" }
+$script:GitExe = Resolve-GitExecutable
+$gitRootResult = Invoke-Native -FilePath $script:GitExe -ArgumentList @('-C', $script:RepoPath, 'rev-parse', '--show-toplevel') -WorkingDirectory $script:RepoPath
+if ($gitRootResult.ExitCode -ne 0 -or [IO.Path]::GetFullPath([string]$gitRootResult.StdOut.Trim()).TrimEnd('\') -ne [IO.Path]::GetFullPath($script:RepoPath).TrimEnd('\')) { throw "Refusing to run: the configured repo path is not the Git worktree root (exit $($gitRootResult.ExitCode))." }
+if ($TestMode -and -not $script:RepoPath.StartsWith($expectedTestRoot + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Test clone escaped repo/.test-tmp.' }
+if (-not $TestMode -and $PythonPath -ne 'C:\CryptoScope\tools\python-3.14\python.exe') { throw 'Production interpreter path is fixed at C:\CryptoScope\tools\python-3.14\python.exe.' }
+$script:LogDir = Join-Path $resolvedRoot 'logs'
+$script:StateDir = Join-Path $resolvedRoot 'state'
+New-Item -ItemType Directory -Force -Path $script:LogDir, $script:StateDir | Out-Null
+$script:LogPath = Join-Path $script:LogDir 'publisher.log'
+$script:StatusPath = Join-Path $script:StateDir 'last-run.json'
+$lockPath = Join-Path $script:StateDir 'publisher.lock'
+$lockStream = $null
+try {
+    try { $lockStream = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+    catch [IO.IOException] { Write-JobLog 'SKIPPED_LOCKED another publisher run holds the exclusive lock'; Save-Status 'SKIPPED_LOCKED' 'Another run holds the local lock.'; return }
+    Write-JobLog 'STARTED'
+    $gitVersion = Invoke-Native -FilePath $script:GitExe -ArgumentList @('--version') -WorkingDirectory $script:RepoPath
+    if ($gitVersion.ExitCode -ne 0) { throw "PREFLIGHT_FAILED Git version check failed (exit $($gitVersion.ExitCode))." }
+    Write-JobLog "GIT executable=$script:GitExe; version=$($gitVersion.StdOut.Trim())"
+    if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) { throw "PREFLIGHT_FAILED fixed interpreter missing: $PythonPath" }
+    $probe = Invoke-Native -FilePath $PythonPath -ArgumentList @('-c', "import sys,json,urllib.request,xml.etree.ElementTree,ssl; print('CPython' if sys.implementation.name == 'cpython' else sys.implementation.name, sys.version_info[0], sys.version_info[1])") -WorkingDirectory $script:RepoPath
+    if ($probe.ExitCode -ne 0) { throw "PREFLIGHT_FAILED interpreter smoke import failed (exit $($probe.ExitCode))." }
+    $match = [regex]::Match($probe.StdOut.Trim(), '^CPython\s+(\d+)\s+(\d+)')
+    if (-not $match.Success) { throw 'PREFLIGHT_FAILED interpreter is not CPython.' }
+    $pyMajor = [int]$match.Groups[1].Value; $pyMinor = [int]$match.Groups[2].Value
+    Write-JobLog "INTERPRETER CPython $pyMajor.$pyMinor; stdlib smoke imports passed"
+    if (($pyMajor -lt 3) -or ($pyMajor -eq 3 -and $pyMinor -lt 12)) { throw "PREFLIGHT_FAILED CPython >=3.12 required; found $pyMajor.$pyMinor" }
+    $script:PythonPath = $PythonPath
+
+    Assert-ApprovedOrigin
+    Invoke-Git @('fetch', 'origin', 'main') | Out-Null
+    Write-JobLog 'FETCH origin/main succeeded; Git output suppressed'
+    Invoke-Git @('reset', '--hard', 'origin/main') | Out-Null
+    Write-JobLog 'SYNCED reset --hard origin/main inside verified dedicated clone'
+    if ($TestMode) {
+        $fixtureResult = Invoke-Native -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $TestRefreshScript, '-RepoPath', $script:RepoPath) -WorkingDirectory $script:RepoPath
+        if ($fixtureResult.ExitCode -ne 0) { throw "Fixture refresh failed with exit $($fixtureResult.ExitCode)" }
+        if ($TestRemoteAdvanceScript) {
+            $advanceResult = Invoke-Native -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $TestRemoteAdvanceScript, '-RemoteClonePath', $TestRemoteClonePath) -WorkingDirectory $script:RepoPath
+            if ($advanceResult.ExitCode -ne 0) { throw "Disposable remote advance fixture failed with exit $($advanceResult.ExitCode)" }
+        }
+    } else {
+        $refreshResult = Invoke-Native -FilePath $PythonPath -ArgumentList @((Join-Path $script:RepoPath 'refresh_hourly.py')) -WorkingDirectory $script:RepoPath -TimeoutSeconds 1800
+        if ($refreshResult.ExitCode -ne 0) { throw "refresh_hourly.py failed with exit $($refreshResult.ExitCode)" }
+    }
+    Assert-ArtifactSchemas
+    foreach ($rel in $AllowedPaths) { [void](Get-CaptureTime (Join-Path $script:RepoPath $rel)) }
+    Assert-AllowedChanges
+    Invoke-Git (@('add', '--') + $AllowedPaths) | Out-Null
+    Assert-AllowedChanges
+    $staged = Invoke-Git @('diff', '--cached', '--name-only')
+    if (@($staged).Count -gt 0) {
+        foreach ($p in $staged) { if ($AllowedPaths -notcontains $p.Replace('\', '/')) { throw "Refusing unexpected commit path: $p" } }
+        Invoke-Git @('commit', '-m', 'Refresh hourly market snapshot') | ForEach-Object { Write-JobLog "GIT $_" }
+    } else { Write-JobLog 'NO_CHANGES' }
+    $localHead = Get-Head 'HEAD'
+    $script:LocalCommit = $localHead
+    if ($DryRun) {
+        Write-JobLog "DRY_RUN remote unchanged; local HEAD $localHead; no push attempted"
+        Save-Status 'DRY_RUN_REMOTE_UNCHANGED' 'Artifacts validated and local commit prepared; remote ref was not changed.' (Get-Head 'origin/main')
+        return
+    }
+    $published = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Assert-ApprovedOrigin
+        $pushResult = Invoke-Native -FilePath $script:GitExe -ArgumentList @('-C', $script:RepoPath, 'push', 'origin', 'HEAD:main') -WorkingDirectory $script:RepoPath
+        $pushCode = $pushResult.ExitCode
+        if ($pushCode -eq 0) {
+            Invoke-Git @('fetch', 'origin', 'main') | Out-Null
+            $remoteHead = Get-Head 'origin/main'
+            if ($remoteHead -ne $localHead) { throw "Push returned success but remote ref does not equal local commit (remote $remoteHead, local $localHead)." }
+            Write-JobLog "PUBLISHED remote ref verified at $remoteHead"
+            Save-Status 'PUBLISHED' 'Remote ref verified at the local publisher commit.' $remoteHead
+            $published = $true
+            break
+        }
+        $pushText = $pushResult.StdErr + ' ' + $pushResult.StdOut
+        if ($pushText -notmatch '(?i)non-fast-forward|fetch first|\[rejected\]') { throw "Push failed (exit $pushCode); authentication and remote details were not logged." }
+        Write-JobLog "PUSH_REJECTED attempt=$attempt; capture-time recovery"
+        if ($attempt -eq 3) { break }
+        Invoke-Git @('fetch', 'origin', 'main') | Out-Null
+        $capturedLocal = @{}
+        $tempDir = Join-Path $script:StateDir 'reapply'
+        New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+        foreach ($rel in $AllowedPaths) { Copy-Item -LiteralPath (Join-Path $script:RepoPath $rel) -Destination (Join-Path $tempDir ([IO.Path]::GetFileName($rel))) -Force; $capturedLocal[$rel] = Get-CaptureTime (Join-Path $tempDir ([IO.Path]::GetFileName($rel))) }
+        Invoke-Git @('reset', '--hard', 'origin/main') | Out-Null
+        $reapplied = @()
+        foreach ($rel in $AllowedPaths) {
+            $remoteFile = Join-Path $script:RepoPath $rel
+            $remoteTime = Get-CaptureTime $remoteFile
+            $localCopy = Join-Path $tempDir ([IO.Path]::GetFileName($rel))
+            if ($capturedLocal[$rel] -gt $remoteTime) { Copy-Item -LiteralPath $localCopy -Destination $remoteFile -Force; $reapplied += $rel }
+        }
+        if ($reapplied.Count -eq 0) { throw 'Remote artifacts are at least as new as this capture; stopped without publishing stale data.' }
+        Assert-AllowedChanges
+        Invoke-Git (@('add', '--') + $reapplied) | Out-Null
+        Assert-AllowedChanges
+        Invoke-Git @('commit', '-m', 'Refresh hourly market snapshot (capture-time recovery)') | ForEach-Object { Write-JobLog "GIT $_" }
+        $localHead = Get-Head 'HEAD'
+        $script:LocalCommit = $localHead
+    }
+    if (-not $published) { throw 'Push retries exhausted after three attempts; remote was not force-updated.' }
+} catch {
+    $msg = $_.Exception.Message
+    Write-JobLog "FAILED $msg"
+    try { Save-Status 'FAILED' $msg } catch { }
+    exit 1
+} finally {
+    if ($lockStream) { $lockStream.Dispose() }
+}
+
