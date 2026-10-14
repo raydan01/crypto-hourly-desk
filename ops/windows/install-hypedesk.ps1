@@ -5,6 +5,8 @@ param(
     [switch]$TestMode
 )
 $ErrorActionPreference = 'Stop'
+$nativeModule = Join-Path $PSScriptRoot 'HypeDesk.Native.psm1'
+Import-Module -Name $nativeModule -Force -ErrorAction Stop
 $TaskName = 'MarketAttention-HypeDesk-Hourly'
 
 function Resolve-GitExecutable([object[]]$Candidates = $null) {
@@ -34,14 +36,17 @@ $repo = Join-Path $resolvedRoot 'repo'
 $gitExe = Resolve-GitExecutable
 $runner = Join-Path $repo 'ops\windows\run-hypedesk.ps1'
 if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw "Publisher runner missing: $runner" }
-$gitRoot = & $gitExe -C $repo rev-parse --show-toplevel 2>$null
-if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath([string]$gitRoot).TrimEnd('\') -ne [IO.Path]::GetFullPath($repo).TrimEnd('\')) { throw 'Configured repo is not the clone root.' }
-$fetchUrls = @(& $gitExe -C $repo remote get-url --all origin 2>$null | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
-$fetchCode = $LASTEXITCODE
-$pushUrls = @(& $gitExe -C $repo remote get-url --push --all origin 2>$null | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
-$pushCode = $LASTEXITCODE
-$configuredPushUrls = @(& $gitExe -C $repo config --get-all remote.origin.pushurl 2>$null | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
-$pushConfigCode = $LASTEXITCODE
+$gitRootResult = Invoke-Native -FilePath $gitExe -ArgumentList @('-C', $repo, 'rev-parse', '--show-toplevel') -WorkingDirectory $repo
+if ($gitRootResult.ExitCode -ne 0 -or [IO.Path]::GetFullPath([string]$gitRootResult.StdOut.Trim()).TrimEnd('\') -ne [IO.Path]::GetFullPath($repo).TrimEnd('\')) { throw "Configured repo is not the clone root (exit $($gitRootResult.ExitCode))." }
+$fetchResult = Invoke-Native -FilePath $gitExe -ArgumentList @('-C', $repo, 'remote', 'get-url', '--all', 'origin') -WorkingDirectory $repo
+$fetchUrls = @($fetchResult.StdOut -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$pushResult = Invoke-Native -FilePath $gitExe -ArgumentList @('-C', $repo, 'remote', 'get-url', '--push', '--all', 'origin') -WorkingDirectory $repo
+$pushUrls = @($pushResult.StdOut -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$pushConfigResult = Invoke-Native -FilePath $gitExe -ArgumentList @('-C', $repo, 'config', '--get-all', 'remote.origin.pushurl') -WorkingDirectory $repo
+$configuredPushUrls = @($pushConfigResult.StdOut -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$fetchCode = $fetchResult.ExitCode
+$pushCode = $pushResult.ExitCode
+$pushConfigCode = $pushConfigResult.ExitCode
 $originPattern = '^https://github\.com/raydan01/crypto-hourly-desk(?:\.git)?$'
 if ($fetchCode -ne 0 -or $pushCode -ne 0 -or $pushConfigCode -gt 1 -or $fetchUrls.Count -eq 0 -or $pushUrls.Count -eq 0) { throw 'Configured repository fetch and push URLs could not be validated.' }
 if ($TestMode) {

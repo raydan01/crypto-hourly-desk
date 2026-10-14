@@ -231,7 +231,7 @@ try {
   }
   await evaluate(`navigator.serviceWorker.ready.then(() => true)`);
   const serviceWorkerState = await evaluate(`(async()=>({secure:window.isSecureContext,controller:Boolean(navigator.serviceWorker.controller),registrations:(await navigator.serviceWorker.getRegistrations()).map(reg=>({scope:reg.scope,active:reg.active?.state,waiting:reg.waiting?.state,installing:reg.installing?.state}))}))()`);
-  await send("Page.navigate", {url:`http://127.0.0.1:${sitePort}/index.html`});
+  await send("Page.navigate", {url:`http://127.0.0.1:${sitePort}/crypto-hourly-desk/index.html`});
   await waitFor(`navigator.serviceWorker.controller && document.querySelector("#hype-refresh-status")`, `service worker control ${JSON.stringify(serviceWorkerState)}`);
   await send("Network.emulateNetworkConditions", {offline:true, latency:0, downloadThroughput:0, uploadThroughput:0, connectionType:"none"});
   serverOffline = true;
