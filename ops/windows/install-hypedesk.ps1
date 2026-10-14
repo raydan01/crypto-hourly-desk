@@ -24,6 +24,14 @@ $runner = Join-Path $repo 'ops\windows\run-hypedesk.ps1'
 if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw "Publisher runner missing: $runner" }
 $gitRoot = & git -C $repo rev-parse --show-toplevel 2>$null
 if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath([string]$gitRoot).TrimEnd('\') -ne [IO.Path]::GetFullPath($repo).TrimEnd('\')) { throw 'Configured repo is not the clone root.' }
+$origin = & git -C $repo remote get-url origin 2>$null
+$originPattern = '^https://github\.com/raydan01/crypto-hourly-desk(?:\.git)?$'
+if ($TestMode) {
+    $testOrigin = [IO.Path]::GetFullPath(([string]$origin).Trim())
+    if ($LASTEXITCODE -ne 0 -or -not $testOrigin.StartsWith($testRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $testOrigin -PathType Container)) { throw 'TestMode origin must be an existing disposable remote under repo/.test-tmp.' }
+} elseif ($LASTEXITCODE -ne 0 -or ([string]$origin).Trim() -notmatch $originPattern) {
+    throw 'Configured repo origin does not match the approved Market Attention repository.'
+}
 
 if ($TestMode) {
     $inventoryPath = Join-Path $resolvedRoot 'state\mock-task-inventory.json'

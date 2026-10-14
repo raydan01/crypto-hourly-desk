@@ -39,19 +39,20 @@ const rules = fs.readFileSync(path.join(ROOT, "data", "attention-rules.json"));
 const requests = [];
 const counts = {social: 0, rules: 0, trending: 0, dex: 0, dexAddresses: []};
 let sitePort;
+let serverOffline = false;
 const server = http.createServer((request, response) => {
+  if (serverOffline) { request.socket.destroy(); return; }
   const url = new URL(request.url, "http://127.0.0.1");
   const pathname = decodeURIComponent(url.pathname);
   const scenario = url.searchParams.get("scenario") || new URL(request.headers.referer || "http://127.0.0.1").searchParams.get("scenario") || "success";
   const reply = (status, body) => response.writeHead(status, {"content-type":"application/json; charset=utf-8", "cache-control":"no-store"}).end(typeof body === "string" ? body : JSON.stringify(body));
   if (pathname === "/") { response.writeHead(302, {location:"/index.html"}).end(); return; }
   if (pathname === "/data/social-context-v2-latest.json") {
-    counts.social += 1; requests.push("artifact");
+    if (url.searchParams.has("_fresh")) { counts.social += 1; requests.push("artifact"); }
     setTimeout(() => reply(200, artifact), 120);
     return;
   }
-  if (pathname === "/data/attention-rules.json") { counts.rules += 1; requests.push("rules"); if (scenario === "rules-failure") { response.writeHead(503).end("rule table unavailable"); return; } reply(200, rules.toString("utf8")); return; }
-  if (pathname === "/service-worker.js") { response.writeHead(200, {"content-type":"text/javascript; charset=utf-8", "cache-control":"no-store"}).end(""); return; }
+  if (pathname === "/data/attention-rules.json") { if (url.searchParams.has("_fresh")) { counts.rules += 1; requests.push("rules"); } if (scenario === "rules-failure") { response.writeHead(503).end("rule table unavailable"); return; } reply(200, rules.toString("utf8")); return; }
   if (pathname === "/mock-coingecko/trending") {
     counts.trending += 1; requests.push("coingecko");
     if (scenario === "cg-failure") { reply(429, {error:"Too Many Requests"}); return; }
@@ -112,7 +113,7 @@ try {
   ws = new WebSocket(wsUrl);
   await new Promise((resolve, reject) => { ws.addEventListener("open", resolve, {once:true}); ws.addEventListener("error", reject, {once:true}); });
   ws.addEventListener("message", event => { const message = JSON.parse(event.data); if (message.id && pending.has(message.id)) { const slot = pending.get(message.id); pending.delete(message.id); message.error ? slot.reject(new Error(message.error.message)) : slot.resolve(message.result); } });
-  await send("Page.enable"); await send("Runtime.enable");
+  await send("Page.enable"); await send("Runtime.enable"); await send("Network.enable");
   await send("Emulation.setDeviceMetricsOverride", {width:375, height:812, deviceScaleFactor:1, mobile:true});
   await send("Page.navigate", {url:`http://127.0.0.1:${sitePort}/index.html?scenario=success`});
   // Boot, visible-again and button events overlap while the artifact response is held.
@@ -142,6 +143,37 @@ try {
   assert.ok(!penguReplay.observations.some(row => row.kind === "BUY_SELL_IMBALANCE" && row.pair_address === pressurePair[0].pair_address));
   assert.deepEqual(Object.fromEntries(parityReplay.momentum.map(row=>[row.id,row.state])), {crawlerpad:"RISING",quantus:"MIXED","bunker-mode":"MIXED","identity-md-6900":"FADING"});
   assert.equal(parityReplay.missing.state, "INSUFFICIENT_HISTORY");
+  const boundaryCases = await evaluate(`(() => {
+    const rules=${JSON.stringify(JSON.parse(rules.toString("utf8")))};
+    const base={coingecko_id:"boundary",name:"Boundary Token",symbol:"BND",observed_at_utc:new Date().toISOString(),trending:{rank:10,previous_rank:10},market:{price_usd:1,market_cap_usd:1000,volume_24h_usd:100,volume_market_cap_ratio:0.1},identity:{contracts:[]},mentions:{google_news:{status:"NOT_QUERIED",headlines:[]},reddit:{status:"NOT_QUERIED",headlines:[]}},dex_pairs:[{is_primary:true,dex_id:"testdex",pair_address:"boundary-pair",liquidity_usd:500,fdv_usd:1000,age_seconds:90000,price_change_by_period:{h24:100},buys_sells_by_period:{h24:{buys:10,sells:10}}}],fomo_watch:{status:"UNKNOWN",observations:[]}};
+    const prior={observed_at_utc:new Date(Date.now()-3600000).toISOString(),trending:{rank:10},market:{volume_24h_usd:100}};
+    const result={};
+    for(const volume of [105,95]) {
+      const item=structuredClone(base); item.market.volume_24h_usd=volume;
+      const computed=window.evaluateAttentionRules(item,rules,prior);
+      item.momentum=computed.momentum; item.fomo_watch={status:computed.observations.length?"WATCH_ONLY":"UNKNOWN",observations:computed.observations};
+      window.renderHype({captured_at_utc:item.observed_at_utc,items:[item]});
+      document.querySelector("#social-items .hype-card").open=true;
+      const text=document.querySelector("#social-items").innerText;
+      result[String(volume)]={state:computed.momentum.state,volume_change_pct:computed.momentum.volume_change_pct,flags:(text.match(/FOMO flags/g)||[]).length?Number(text.match(/(\\d+) FOMO flags/)?.[1]):-1,card:text};
+    }
+    const item=structuredClone(base); const exactly100=window.evaluateAttentionRules(item,rules,null);
+    item.momentum=exactly100.momentum; item.fomo_watch={status:"UNKNOWN",observations:exactly100.observations};
+    window.renderHype({captured_at_utc:item.observed_at_utc,items:[item]});
+    document.querySelector("#social-items .hype-card").open=true;
+    result.dex100={observations:exactly100.observations.map(row=>row.kind),card:document.querySelector("#social-items").innerText};
+    item.dex_pairs[0].price_change_by_period.h24=100.01;
+    const above100=window.evaluateAttentionRules(item,rules,null);
+    item.fomo_watch={status:"WATCH_ONLY",observations:above100.observations}; window.renderHype({captured_at_utc:item.observed_at_utc,items:[item]});
+    document.querySelector("#social-items .hype-card").open=true;
+    result.dexAbove100={observations:above100.observations.map(row=>row.kind),card:document.querySelector("#social-items").innerText};
+    return result;
+  })()`);
+  for (const volume of [105,95]) { assert.equal(boundaryCases[String(volume)].state, "FLAT", JSON.stringify(boundaryCases[String(volume)])); assert.match(boundaryCases[String(volume)].card, /flat/); }
+  assert.deepEqual(boundaryCases.dex100.observations, []);
+  assert.match(boundaryCases.dex100.card, /0 FOMO flags/);
+  assert.deepEqual(boundaryCases.dexAbove100.observations, ["DEX_PRICE_MOVE"]);
+  assert.match(boundaryCases.dexAbove100.card, /1 FOMO flags/);
   await send("Page.captureScreenshot", {format:"png", captureBeyondViewport:false}).then(result => fs.writeFileSync(path.join(OUT, "success-live-merge.png"), Buffer.from(result.data,"base64")));
   const initialStarts = counts.trending;
   await evaluate(`document.querySelector("#hype-refresh-button").click()`);
@@ -169,7 +201,24 @@ try {
     assert.equal(fallback.liveLabels, 0, "failed live request retains an artifact-only view");
     await send("Page.captureScreenshot", {format:"png", captureBeyondViewport:false}).then(result => fs.writeFileSync(path.join(OUT, `${scenario}-fallback.png`), Buffer.from(result.data,"base64")));
   }
-  const report = {browser:"Microsoft Edge headless CDP", viewport:"375x812 CSS px via Emulation.setDeviceMetricsOverride", success:successView, parityReplay, cooldown, newCoin, requestCounts:counts, requestOrder:requests, scenarios:["coalesced boot/visibility/button", "live merge", "new coin without address lookup", "attention-rule load failure fallback", "CoinGecko rate limit fallback", "DEX failure fallback", "Python/JavaScript shared-capture parity outcomes"], screenshots:["success-live-merge.png","new-coin.png","rules-failure-fallback.png","cg-failure-fallback.png","dex-failure-fallback.png"]};
+  await evaluate(`navigator.serviceWorker.ready.then(() => true)`);
+  const serviceWorkerState = await evaluate(`(async()=>({secure:window.isSecureContext,controller:Boolean(navigator.serviceWorker.controller),registrations:(await navigator.serviceWorker.getRegistrations()).map(reg=>({scope:reg.scope,active:reg.active?.state,waiting:reg.waiting?.state,installing:reg.installing?.state}))}))()`);
+  await send("Page.navigate", {url:`http://127.0.0.1:${sitePort}/index.html`});
+  await waitFor(`navigator.serviceWorker.controller && document.querySelector("#hype-refresh-status")`, `service worker control ${JSON.stringify(serviceWorkerState)}`);
+  await send("Network.emulateNetworkConditions", {offline:true, latency:0, downloadThroughput:0, uploadThroughput:0, connectionType:"none"});
+  serverOffline = true;
+  await send("Page.reload", {ignoreCache:true});
+  try { await waitFor(`document.querySelector("#hype-refresh-status")?.textContent.startsWith("Live refresh failed") && document.querySelectorAll("#social-items .hype-card").length > 0`, "offline cached artifact fallback", 20000); }
+  catch (error) { const debug = await evaluate(`(async()=>({url:location.href,status:document.querySelector("#hype-refresh-status")?.textContent,summary:document.querySelector("#social-summary")?.textContent,cards:document.querySelectorAll("#social-items .hype-card").length,controller:Boolean(navigator.serviceWorker.controller),caches:await caches.keys()}))()`); throw new Error(`${error.message}; offline state ${JSON.stringify(debug)}; prior ${JSON.stringify(serviceWorkerState)}`); }
+  const offline = await evaluate(`({status:document.querySelector("#hype-refresh-status").textContent,summary:document.querySelector("#social-summary").textContent,cards:document.querySelectorAll("#social-items .hype-card").length,cacheController:Boolean(navigator.serviceWorker.controller)})`);
+  assert.match(offline.status, /showing background capture/);
+  assert.match(offline.summary, /Background artifact captured/);
+  assert.match(offline.summary, /\(\d+m old; stale after 2h\)/);
+  assert.ok(offline.cards > 0, JSON.stringify(offline));
+  await send("Page.captureScreenshot", {format:"png", captureBeyondViewport:false}).then(result => fs.writeFileSync(path.join(OUT, "offline-cached-artifact.png"), Buffer.from(result.data,"base64")));
+  serverOffline = false;
+  await send("Network.emulateNetworkConditions", {offline:false, latency:0, downloadThroughput:-1, uploadThroughput:-1, connectionType:"none"});
+  const report = {browser:"Microsoft Edge headless CDP", viewport:"375x812 CSS px via Emulation.setDeviceMetricsOverride", success:successView, parityReplay, boundaryCases, offline, cooldown, newCoin, requestCounts:counts, requestOrder:requests, scenarios:["coalesced boot/visibility/button", "live merge", "new coin without address lookup", "attention-rule load failure fallback", "CoinGecko rate limit fallback", "DEX failure fallback", "Python/JavaScript shared-capture parity outcomes", "exact 100% DEX and +/-5% volume UI parity", "offline cached artifact startup with capture age"], screenshots:["success-live-merge.png","new-coin.png","rules-failure-fallback.png","cg-failure-fallback.png","dex-failure-fallback.png","offline-cached-artifact.png"]};
   fs.writeFileSync(path.join(OUT, "results.json"), JSON.stringify(report,null,2));
   console.log(JSON.stringify(report,null,2));
 } catch (error) { runError = error; }

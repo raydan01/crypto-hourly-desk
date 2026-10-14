@@ -207,44 +207,9 @@ function renderHype(social, refreshInfo = {}) {
   const compactMoney = value => value == null ? "unknown" : `$${Number(value).toLocaleString(undefined, {notation: "compact", maximumFractionDigits: 1})}`;
   const compactAge = seconds => seconds == null || !Number.isFinite(Number(seconds)) ? "unknown" : Number(seconds) < 3600 ? `${Math.floor(Number(seconds) / 60)}m` : `${Math.floor(Number(seconds) / 3600)}h`;
   const primaryPair = item => [...(item.dex_pairs || [])].filter(pair => pair.liquidity_usd != null).sort((a, b) => Number(b.liquidity_usd) - Number(a.liquidity_usd))[0] || (item.dex_pairs || []).find(pair => pair.is_primary === true) || (item.dex_pairs || [])[0] || null;
-  const observationPair = (row, item) => {
-    const pairs = item.dex_pairs || [];
-    if (row.pair_address) return pairs.find(pair => pair.pair_address === row.pair_address && (!row.dex_id || pair.dex_id === row.dex_id)) || null;
-    if (row.kind === "PAIR_UNDER_24H") { const matches = pairs.filter(pair => pair.age_seconds === (row.pair_age_seconds ?? row.age_seconds)); return matches.length === 1 ? matches[0] : null; }
-    if (row.kind === "LIQUIDITY_UNDER_5_PERCENT") return pairs.find(pair => pair.liquidity_usd === row.liquidity_usd) || null;
-    if (["BUY_SELL_IMBALANCE", "SELLING_PRESSURE"].includes(row.kind)) return pairs.find(pair => { const tx = pair.buys_sells_by_period?.h24 || {}; return tx.buys === row.buys_24h && tx.sells === row.sells_24h; }) || null;
-    if (row.kind === "DEX_PRICE_MOVE") return pairs.find(pair => pair.price_change_by_period?.h24 === row.change_24h_pct) || null;
-    return null;
-  };
-  const observationsFor = item => {
-    const primary = primaryPair(item);
-    const seenFlagKinds = new Set();
-    const rows = (item.fomo_watch?.observations || []).flatMap(row => {
-      const pair = observationPair(row, item);
-      const pairSpecific = ["PAIR_UNDER_24H", "LIQUIDITY_UNDER_5_PERCENT", "BUY_SELL_IMBALANCE", "SELLING_PRESSURE", "DEX_PRICE_MOVE"].includes(row.kind);
-      if (pairSpecific && !pair) return [];
-      const values = pair ? {...row, pair_address: row.pair_address || pair.pair_address, dex_id: row.dex_id || pair.dex_id} : row;
-      if (["BUY_SELL_IMBALANCE", "SELLING_PRESSURE"].includes(row.kind)) {
-        const buys = Number(values.buys_24h), sells = Number(values.sells_24h);
-        if (!Number.isFinite(buys) || !Number.isFinite(sells) || Math.max(buys, sells) < 20 || Math.max(buys, sells) < 1.5 * Math.max(1, Math.min(buys, sells))) return [];
-        if (sells >= 1.5 * Math.max(1, buys)) values.kind = "SELLING_PRESSURE";
-        else if (buys >= 1.5 * Math.max(1, sells) && pair === primary) values.kind = "BUY_SELL_IMBALANCE";
-        else return [];
-      }
-      if (pairSpecific && values.kind !== "SELLING_PRESSURE" && pair !== primary) return [];
-      if (values.kind !== "SELLING_PRESSURE") {
-        if (seenFlagKinds.has(values.kind)) return [];
-        seenFlagKinds.add(values.kind);
-      }
-      return [{...values, pair}];
-    });
-    const move = primary?.price_change_by_period?.h24;
-    if (move != null && Math.abs(Number(move)) >= 100 && !rows.some(row => ["PRICE_MOVE_ABOVE_100_PERCENT", "DEX_PRICE_MOVE"].includes(row.kind))) rows.push({kind: "DEX_PRICE_MOVE", source: `${primary.dex_id || "DEX"} DEX Screener 24h price move`, change_24h_pct: move, pair_address: primary.pair_address, dex_id: primary.dex_id, pair: primary});
-    return rows;
-  };
   const observationLine = (row, item) => {
     const values = row;
-    const pair = row.pair || observationPair(row, item);
+    const pair = (item.dex_pairs || []).find(candidate => row.pair_address && candidate.pair_address === row.pair_address && (!row.dex_id || candidate.dex_id === row.dex_id)) || null;
     const source = String(row.source || "").toLowerCase().includes("coingecko") ? "CoinGecko" : `${values.dex_id || pair?.dex_id || "DEX"}, DEX Screener`;
     const pairLabel = pair ? `; pair ${pair.dex_id || "DEX"} ${pair.pair_address || "address unknown"}` : "";
     const ratioText = ratio => Number.isInteger(ratio) ? String(ratio) : ratio.toFixed(1);
@@ -265,7 +230,7 @@ function renderHype(social, refreshInfo = {}) {
     const momentum = item.momentum || {};
     const trending = item.trending || {};
     const fomo = item.fomo_watch || {};
-    const observationRows = observationsFor(item);
+    const observationRows = fomo.observations || [];
     const observations = observationRows.map(row => `<li class="${row.kind === "SELLING_PRESSURE" ? "selling-pressure" : "fomo-flag"}">${escapeHtml(observationLine(row, item))}</li>`).join("");
     const headlineTop = [item.mentions?.google_news, item.mentions?.reddit].flatMap(value => value?.headlines || []).sort((a, b) => Date.parse(b.published_at_utc) - Date.parse(a.published_at_utc)).slice(0, 3);
     const multiContract = (item.identity?.contracts || []).length > 1;
@@ -279,13 +244,7 @@ function renderHype(social, refreshInfo = {}) {
     const rankHistory = trending.previous_rank != null ? `Rank #${trending.rank ?? "?"} (was #${trending.previous_rank})` : `Rank #${trending.rank ?? "?"} | first capture, no history yet`;
     const volumeChange = momentum.volume_change_pct;
     const volumeDirection = volumeChange == null ? "" : volumeChange > 0 ? "↑" : volumeChange < 0 ? "↓" : "→";
-    const rankChange = momentum.rank_change ?? trending.change;
-    let momentumState = momentum.state || trending.state || "unknown";
-    if (rankChange != null && volumeChange != null) {
-      const rankDirection = rankChange > 0 ? 1 : rankChange < 0 ? -1 : 0;
-      const volumeTrend = volumeChange >= 5 ? 1 : volumeChange <= -5 ? -1 : 0;
-      momentumState = rankDirection && volumeTrend && rankDirection !== volumeTrend ? "MIXED" : rankDirection > 0 || (rankDirection === 0 && volumeTrend > 0) ? "RISING" : rankDirection < 0 || (rankDirection === 0 && volumeTrend < 0) ? "FADING" : "FLAT";
-    }
+    const momentumState = momentum.state || "unknown";
     const momentumSummary = `${rankHistory} | ${volumeDirection} volume ${volumeChange == null ? "unknown" : `${Number(volumeChange) > 0 ? "+" : ""}${Number(volumeChange).toFixed(1)}%`} | ${String(momentumState).replaceAll("_", " ").toLowerCase()}`;
     const fomoCount = observationRows.filter(row => row.kind !== "SELLING_PRESSURE").length;
     const newsCount = count(item.mentions?.google_news, "24h");
@@ -483,7 +442,7 @@ function calculateAttentionMomentum(previousRank, currentRank, previousVolume, c
   const volumesValid = priorVolume != null && priorVolume > 0 && liveVolume != null && band != null;
   if (!hasValidHistory || !ranksValid || !volumesValid) return {state: "INSUFFICIENT_HISTORY", rank_change: null, volume_change_pct: null};
   const rankChange = priorRank - liveRank;
-  const volumeChange = (liveVolume / priorVolume - 1) * 100;
+  const volumeChange = ((liveVolume - priorVolume) / priorVolume) * 100;
   const rankDirection = Math.sign(rankChange);
   const volumeDirection = volumeChange > band ? 1 : volumeChange < -band ? -1 : 0;
   const state = rankDirection && volumeDirection && rankDirection !== volumeDirection ? "MIXED" : rankDirection > 0 || (rankDirection === 0 && volumeDirection > 0) ? "RISING" : rankDirection < 0 || (rankDirection === 0 && volumeDirection < 0) ? "FADING" : "FLAT";

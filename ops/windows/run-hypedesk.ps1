@@ -111,6 +111,15 @@ function Save-Status([string]$State, [string]$Detail, [string]$RemoteRef = '') {
     Move-Item -LiteralPath $tmp -Destination $script:StatusPath -Force
 }
 function Get-Head([string]$Ref) { return ((Invoke-Git @('rev-parse', $Ref)) -join '').Trim() }
+function Assert-ApprovedOrigin {
+    $origin = ((Invoke-Git @('remote', 'get-url', 'origin')) -join '').Trim()
+    if ($TestMode) {
+        try { $testOrigin = [IO.Path]::GetFullPath($origin) } catch { throw 'PREFLIGHT_FAILED disposable origin is invalid.' }
+        if (-not $testOrigin.StartsWith($expectedTestRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $testOrigin -PathType Container)) { throw 'PREFLIGHT_FAILED TestMode origin must be an existing disposable remote under repo/.test-tmp.' }
+        return
+    }
+    if ($origin -notmatch '^https://github\.com/raydan01/crypto-hourly-desk(?:\.git)?$') { throw 'PREFLIGHT_FAILED repository origin does not match the approved Market Attention repository.' }
+}
 
 $resolvedRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
 $testMarker = '\.test-tmp'
@@ -133,7 +142,8 @@ if ($TestMode) {
 }
 $script:RepoPath = Join-Path $resolvedRoot 'repo'
 if (-not (Test-Path -LiteralPath $script:RepoPath -PathType Container)) { throw "Dedicated clone is missing: $script:RepoPath" }
-$gitRoot = (& git -C $script:RepoPath rev-parse --show-toplevel 2>$null)
+$gitExe = (Get-Command git -CommandType Application -ErrorAction Stop).Source
+$gitRoot = (& $gitExe -C $script:RepoPath rev-parse --show-toplevel 2>$null)
 if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath([string]$gitRoot).TrimEnd('\') -ne [IO.Path]::GetFullPath($script:RepoPath).TrimEnd('\')) { throw 'Refusing to run: the configured repo path is not the Git worktree root.' }
 if ($TestMode -and -not $script:RepoPath.StartsWith($expectedTestRoot + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Test clone escaped repo/.test-tmp.' }
 if (-not $TestMode -and $PythonPath -ne 'C:\CryptoScope\tools\python-3.14\python.exe') { throw 'Production interpreter path is fixed at C:\CryptoScope\tools\python-3.14\python.exe.' }
@@ -159,6 +169,7 @@ try {
     $script:PythonPath = $PythonPath
 
     $env:GIT_TERMINAL_PROMPT = '0'; $env:GCM_INTERACTIVE = 'Never'
+    Assert-ApprovedOrigin
     Invoke-Git @('fetch', 'origin', 'main') | Out-Null
     Write-JobLog 'FETCH origin/main succeeded; Git output suppressed'
     Invoke-Git @('reset', '--hard', 'origin/main') | Out-Null
@@ -193,7 +204,8 @@ try {
     }
     $published = $false
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-        $pushOutput = & git -C $script:RepoPath push origin HEAD:main 2>&1
+        Assert-ApprovedOrigin
+        $pushOutput = & $gitExe -C $script:RepoPath push origin HEAD:main 2>&1
         $pushCode = $LASTEXITCODE
         if ($pushCode -eq 0) {
             Invoke-Git @('fetch', 'origin', 'main') | Out-Null

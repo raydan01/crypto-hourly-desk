@@ -610,7 +610,7 @@ def build_social_context(*, max_trending: int = MAX_TRENDING, enriched: int = MA
             pair["is_primary"] = pair is primary_pair
         rank_change = old.get("trending", {}).get("rank") - rank if old.get("trending", {}).get("rank") is not None else None
         old_volume = (old.get("market") or {}).get("volume_24h_usd")
-        volume_change = round((volume / old_volume - 1) * 100, 6) if isinstance(volume, (int, float)) and isinstance(old_volume, (int, float)) and old_volume else None
+        volume_change = round(((volume - old_volume) / old_volume) * 100, 6) if isinstance(volume, (int, float)) and isinstance(old_volume, (int, float)) and old_volume else None
         mention_changes = {}
         for source, current in (("google_news", news), ("reddit", reddit)):
             prior = (old.get("mentions", {}).get(source) or {})

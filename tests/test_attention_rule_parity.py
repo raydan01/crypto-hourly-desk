@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import social_context
@@ -74,4 +75,16 @@ def test_rule_table_is_the_python_threshold_source():
     # Exact +/-5% remains in the inclusive flat/noise band; outside it may direct momentum.
     assert social_context.evaluate_momentum_state(0, 5, rules=rules) == "FLAT"
     assert social_context.evaluate_momentum_state(0, -5, rules=rules) == "FLAT"
+    assert social_context.evaluate_momentum_state(0, ((105 - 100) / 100) * 100, rules=rules) == "FLAT"
+    assert social_context.evaluate_momentum_state(0, ((95 - 100) / 100) * 100, rules=rules) == "FLAT"
     assert social_context.evaluate_momentum_state(0, 5.0001, rules=rules) == "RISING"
+
+
+def test_hype_renderer_uses_evaluator_output_without_threshold_literals():
+    app = (ROOT / "app.js").read_text(encoding="utf-8")
+    renderer = app.split("function renderHype(", 1)[1].split("function renderLongTerm(", 1)[0]
+    assert "fomo.observations || []" in renderer
+    assert 'momentum.state || "unknown"' in renderer
+    evaluator = app.split("function calculateAttentionMomentum(", 1)[1].split("window.calculateAttentionMomentum = calculateAttentionMomentum;", 1)[0]
+    outside_rule_loader = app.replace("function calculateAttentionMomentum(" + evaluator + "window.calculateAttentionMomentum = calculateAttentionMomentum;", "")
+    assert not re.search(r"(?:>=|>|<=|<)\s*(?:100|5)\b", outside_rule_loader)

@@ -1,5 +1,19 @@
-const CACHE = "crypto-hourly-desk-v10-hype-v4-rules-v1";
+const CACHE = "crypto-hourly-desk-v10-hype-v4-rules-v2";
 const SHELL = ["./", "./index.html", "./styles.css", "./app.js", "./manifest.json", "./icon.svg", "./data/market-opportunities-hourly-latest.json", "./data/market-opportunities-daily-latest.json", "./data/market-opportunities-long-term-latest.json", "./data/social-context-v2-latest.json", "./data/attention-rules.json"];
 self.addEventListener("install", event => { event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener("activate", event => event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith("crypto-hourly-desk-") && key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim())));
-self.addEventListener("fetch", event => { if (event.request.method !== "GET") return; event.respondWith(fetch(event.request).catch(() => caches.match(event.request))); });
+self.addEventListener("fetch", event => {
+  if (event.request.method !== "GET") return;
+  event.respondWith(fetch(event.request).catch(() => {
+    const url = new URL(event.request.url);
+    const artifactPaths = new Set([
+      "/data/market-opportunities-hourly-latest.json",
+      "/data/market-opportunities-daily-latest.json",
+      "/data/market-opportunities-long-term-latest.json",
+      "/data/social-context-v2-latest.json",
+      "/data/attention-rules.json"
+    ]);
+    const sameOriginArtifact = url.origin === self.location.origin && artifactPaths.has(url.pathname);
+    return caches.match(event.request, sameOriginArtifact ? {ignoreSearch: true} : undefined);
+  }));
+});
