@@ -41,7 +41,7 @@ $resolverAst = $runnerAst.Find({ param($node) $node -is [System.Management.Autom
 Assert ($null -ne $resolverAst) 'Runner does not define Git executable resolution.'
 Invoke-Expression $resolverAst.Extent.Text
 $nativePatterns = @([regex]::Escape('2>') + '\s*&\s*1', '&\s*\$')
-$staticTargets = @(Get-ChildItem -LiteralPath (Join-Path $repo 'ops\windows') -Filter '*.ps1' -File | Select-Object -ExpandProperty FullName) + @(Get-ChildItem -LiteralPath (Join-Path $repo 'tests') -Filter '*.ps1' -File | Select-Object -ExpandProperty FullName)
+$staticTargets = @(Get-ChildItem -LiteralPath (Join-Path $repo 'ops\windows') -File | Where-Object { $_.Extension -in @('.ps1', '.psm1') } | Select-Object -ExpandProperty FullName) + @(Get-ChildItem -LiteralPath (Join-Path $repo 'tests') -Filter '*.ps1' -File | Select-Object -ExpandProperty FullName)
 $reservedParameterNames = @('Args', 'Input', 'This', '_', 'PSItem', 'Error', 'Host', 'Matches')
 foreach ($path in $staticTargets) {
     $sourceText = Get-Content -LiteralPath $path -Raw
