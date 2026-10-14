@@ -6,6 +6,17 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $TaskName = 'MarketAttention-HypeDesk-Hourly'
+
+function Resolve-GitExecutable([object[]]$Candidates = $null) {
+    if ($null -eq $Candidates) { $Candidates = @(Get-Command git -CommandType Application -ErrorAction SilentlyContinue) }
+    if (-not $Candidates -or $Candidates.Count -eq 0) { throw 'Git executable was not found.' }
+    $commands = @($Candidates | Where-Object { $_.Source })
+    if ($commands.Count -eq 0) { throw 'Git executable was not found.' }
+    $preferred = @($commands | Where-Object { ([string]$_.Source) -match '(?i)\\cmd\\git\.exe$' } | Select-Object -First 1)
+    if ($preferred.Count -gt 0) { return [string]$preferred[0].Source }
+    return [string]$commands[0].Source
+}
+
 $resolvedRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
 $scriptRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')).TrimEnd('\')
 $testMarker = '\.test-tmp'
@@ -20,17 +31,27 @@ if ($TestMode) {
     if ($resolvedRoot -ne 'C:\HypeDesk') { throw 'Production install root is fixed at C:\HypeDesk.' }
 }
 $repo = Join-Path $resolvedRoot 'repo'
+$gitExe = Resolve-GitExecutable
 $runner = Join-Path $repo 'ops\windows\run-hypedesk.ps1'
 if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw "Publisher runner missing: $runner" }
-$gitRoot = & git -C $repo rev-parse --show-toplevel 2>$null
+$gitRoot = & $gitExe -C $repo rev-parse --show-toplevel 2>$null
 if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath([string]$gitRoot).TrimEnd('\') -ne [IO.Path]::GetFullPath($repo).TrimEnd('\')) { throw 'Configured repo is not the clone root.' }
-$origin = & git -C $repo remote get-url origin 2>$null
+$fetchUrls = @(& $gitExe -C $repo remote get-url --all origin 2>$null | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+$fetchCode = $LASTEXITCODE
+$pushUrls = @(& $gitExe -C $repo remote get-url --push --all origin 2>$null | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+$pushCode = $LASTEXITCODE
+$configuredPushUrls = @(& $gitExe -C $repo config --get-all remote.origin.pushurl 2>$null | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+$pushConfigCode = $LASTEXITCODE
 $originPattern = '^https://github\.com/raydan01/crypto-hourly-desk(?:\.git)?$'
+if ($fetchCode -ne 0 -or $pushCode -ne 0 -or $pushConfigCode -gt 1 -or $fetchUrls.Count -eq 0 -or $pushUrls.Count -eq 0) { throw 'Configured repository fetch and push URLs could not be validated.' }
 if ($TestMode) {
-    $testOrigin = [IO.Path]::GetFullPath(([string]$origin).Trim())
-    if ($LASTEXITCODE -ne 0 -or -not $testOrigin.StartsWith($testRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $testOrigin -PathType Container)) { throw 'TestMode origin must be an existing disposable remote under repo/.test-tmp.' }
-} elseif ($LASTEXITCODE -ne 0 -or ([string]$origin).Trim() -notmatch $originPattern) {
-    throw 'Configured repo origin does not match the approved Market Attention repository.'
+    foreach ($remoteUrl in @($fetchUrls) + @($pushUrls) + @($configuredPushUrls)) {
+        try { $testOrigin = [IO.Path]::GetFullPath($remoteUrl) } catch { throw 'TestMode remotes must use one existing disposable remote under repo/.test-tmp.' }
+        if (-not $testOrigin.StartsWith($testRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $testOrigin -PathType Container)) { throw 'TestMode remotes must use one existing disposable remote under repo/.test-tmp.' }
+    }
+    if (($fetchUrls | Select-Object -Unique).Count -ne 1 -or ($pushUrls | Select-Object -Unique).Count -ne 1 -or $fetchUrls[0] -ne $pushUrls[0]) { throw 'TestMode fetch and push URLs must match.' }
+} elseif (@($fetchUrls + $pushUrls + $configuredPushUrls | Where-Object { $_ -notmatch $originPattern }).Count -gt 0 -or ($fetchUrls | Select-Object -Unique).Count -ne 1 -or ($pushUrls | Select-Object -Unique).Count -ne 1) {
+    throw 'Configured repository fetch or push URL does not match the approved Market Attention repository.'
 }
 
 if ($TestMode) {

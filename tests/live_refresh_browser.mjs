@@ -37,6 +37,7 @@ const trending = JSON.parse(fs.readFileSync(path.join(ROOT, "tests", "fixtures",
 const dexTemplate = JSON.parse(fs.readFileSync(path.join(ROOT, "tests", "fixtures", "dex-pairs.json"), "utf8"));
 const rules = fs.readFileSync(path.join(ROOT, "data", "attention-rules.json"));
 const requests = [];
+const httpPaths = [];
 const counts = {social: 0, rules: 0, trending: 0, dex: 0, dexAddresses: []};
 let sitePort;
 let serverOffline = false;
@@ -44,23 +45,25 @@ const server = http.createServer((request, response) => {
   if (serverOffline) { request.socket.destroy(); return; }
   const url = new URL(request.url, "http://127.0.0.1");
   const pathname = decodeURIComponent(url.pathname);
+  httpPaths.push(pathname);
+  const appPathname = pathname.startsWith("/crypto-hourly-desk/") ? pathname.slice("/crypto-hourly-desk".length) : pathname;
   const scenario = url.searchParams.get("scenario") || new URL(request.headers.referer || "http://127.0.0.1").searchParams.get("scenario") || "success";
   const reply = (status, body) => response.writeHead(status, {"content-type":"application/json; charset=utf-8", "cache-control":"no-store"}).end(typeof body === "string" ? body : JSON.stringify(body));
-  if (pathname === "/") { response.writeHead(302, {location:"/index.html"}).end(); return; }
-  if (pathname === "/data/social-context-v2-latest.json") {
+  if (appPathname === "/") { response.writeHead(302, {location:"/crypto-hourly-desk/index.html"}).end(); return; }
+  if (appPathname === "/data/social-context-v2-latest.json") {
     if (url.searchParams.has("_fresh")) { counts.social += 1; requests.push("artifact"); }
     setTimeout(() => reply(200, artifact), 120);
     return;
   }
-  if (pathname === "/data/attention-rules.json") { if (url.searchParams.has("_fresh")) { counts.rules += 1; requests.push("rules"); } if (scenario === "rules-failure") { response.writeHead(503).end("rule table unavailable"); return; } reply(200, rules.toString("utf8")); return; }
-  if (pathname === "/mock-coingecko/trending") {
+  if (appPathname === "/data/attention-rules.json") { if (url.searchParams.has("_fresh")) { counts.rules += 1; requests.push("rules"); } if (scenario === "rules-failure") { response.writeHead(503).end("rule table unavailable"); return; } reply(200, rules.toString("utf8")); return; }
+  if (appPathname === "/mock-coingecko/trending") {
     counts.trending += 1; requests.push("coingecko");
     if (scenario === "cg-failure") { reply(429, {error:"Too Many Requests"}); return; }
     let payload = structuredClone(trending);
     if (scenario === "new-coin") payload.coins.unshift({item:{id:"unmatched-brand-new-token", name:"Brand New Token", symbol:"NEW", data:{price:1, market_cap:"$10,000,000", total_volume:"$2,000,000", price_change_percentage_24h:{usd:9}}}});
     reply(200, payload); return;
   }
-  if (pathname.startsWith("/mock-dex/token-pairs/v1/")) {
+  if (appPathname.startsWith("/mock-dex/token-pairs/v1/")) {
     counts.dex += 1; requests.push("dex");
     const parts = pathname.split("/");
     const chain = parts.at(-2), address = parts.at(-1);
@@ -69,16 +72,16 @@ const server = http.createServer((request, response) => {
     const pairs = structuredClone(dexTemplate).map(pair => ({...pair, chainId: chain, baseToken: {...pair.baseToken, address}}));
     reply(200, pairs); return;
   }
-  if (pathname.startsWith("/mock-kraken/")) {
-    const endpoint = pathname.split("/").at(-1);
+  if (appPathname.startsWith("/mock-kraken/")) {
+    const endpoint = appPathname.split("/").at(-1);
     const payload = endpoint === "AssetPairs" ? {result:{XXBTZUSD:{status:"online",wsname:"BTC/USD"}}} : endpoint === "OHLC" ? {result:{XXBTZUSD:[[1,"100","105","95","101","100","200",50],[2,"101","106","96","102","100","200",50],[3,"102","107","97","103","100","200",50]],last:3}} : {result:{XXBTZUSD:{c:["100"],b:["99.99"],a:["100.01"],o:"99",h:["105","105"],l:["95","95"],v:["100","100000"]}}};
     reply(200, payload); return;
   }
-  const target = path.resolve(ROOT, `.${pathname}`);
+  const target = path.resolve(ROOT, `.${appPathname}`);
   if (target !== ROOT && !target.startsWith(ROOT + path.sep)) { response.writeHead(403).end("forbidden"); return; }
   fs.readFile(target, (error, content) => {
     if (error) { response.writeHead(404).end("not found"); return; }
-    if (pathname === "/app.js") content = Buffer.from(content.toString("utf8").replaceAll("https://api.kraken.com/0/public", `http://127.0.0.1:${sitePort}/mock-kraken`).replace("https://api.coingecko.com/api/v3/search/trending", `http://127.0.0.1:${sitePort}/mock-coingecko/trending`).replace("https://api.dexscreener.com/token-pairs/v1", `http://127.0.0.1:${sitePort}/mock-dex/token-pairs/v1`));
+    if (appPathname === "/app.js") content = Buffer.from(content.toString("utf8").replaceAll("https://api.kraken.com/0/public", `http://127.0.0.1:${sitePort}/mock-kraken`).replace("https://api.coingecko.com/api/v3/search/trending", `http://127.0.0.1:${sitePort}/mock-coingecko/trending`).replace("https://api.dexscreener.com/token-pairs/v1", `http://127.0.0.1:${sitePort}/mock-dex/token-pairs/v1`));
     response.writeHead(200, {"content-type":mime(target), "cache-control":"no-store"}).end(content);
   });
 });
@@ -89,6 +92,7 @@ fs.mkdirSync(OUT, {recursive:true});
 const profile = fs.mkdtempSync(path.join(ROOT, ".test-tmp", "matt045-edge-profile-"));
 const edge = spawn(EDGE, ["--headless=new", "--no-sandbox", "--disable-gpu", "--disable-extensions", "--no-first-run", "--no-default-browser-check", "--no-proxy-server", "--remote-allow-origins=*", `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`, "about:blank"], {stdio:["ignore","ignore","pipe"], windowsHide:true});
 let ws, target, browserClosed = false, runError = null;
+const browserErrors = [];
 const pending = new Map();
 let commandId = 0;
 const send = (method, params = {}) => new Promise((resolve, reject) => { const id = ++commandId; pending.set(id, {resolve, reject}); ws.send(JSON.stringify({id, method, params})); });
@@ -112,14 +116,16 @@ try {
   assert.ok(wsUrl, "Edge CDP page target did not start");
   ws = new WebSocket(wsUrl);
   await new Promise((resolve, reject) => { ws.addEventListener("open", resolve, {once:true}); ws.addEventListener("error", reject, {once:true}); });
-  ws.addEventListener("message", event => { const message = JSON.parse(event.data); if (message.id && pending.has(message.id)) { const slot = pending.get(message.id); pending.delete(message.id); message.error ? slot.reject(new Error(message.error.message)) : slot.resolve(message.result); } });
+  ws.addEventListener("message", event => { const message = JSON.parse(event.data); if (message.method === "Runtime.exceptionThrown") browserErrors.push(message.params.exceptionDetails); if (message.id && pending.has(message.id)) { const slot = pending.get(message.id); pending.delete(message.id); message.error ? slot.reject(new Error(message.error.message)) : slot.resolve(message.result); } });
   await send("Page.enable"); await send("Runtime.enable"); await send("Network.enable");
   await send("Emulation.setDeviceMetricsOverride", {width:375, height:812, deviceScaleFactor:1, mobile:true});
-  await send("Page.navigate", {url:`http://127.0.0.1:${sitePort}/index.html?scenario=success`});
+  await send("Page.navigate", {url:`http://127.0.0.1:${sitePort}/crypto-hourly-desk/index.html?scenario=success`});
   // Boot, visible-again and button events overlap while the artifact response is held.
   await new Promise(resolve => setTimeout(resolve, 30));
   await evaluate(`document.dispatchEvent(new Event("visibilitychange")); document.querySelector("#hype-refresh-button").click()`);
-  const success = await waitFor(`document.querySelector("#hype-refresh-status")?.textContent.startsWith("Updated live") && document.querySelectorAll("#social-items .hype-card").length > 0`, "successful Hype refresh");
+  let success;
+  try { success = await waitFor(`document.querySelector("#hype-refresh-status")?.textContent.startsWith("Updated live") && document.querySelectorAll("#social-items .hype-card").length > 0`, "successful Hype refresh"); }
+  catch (error) { const debug = await evaluate(`({url:location.href,status:document.querySelector("#hype-refresh-status")?.textContent,summary:document.querySelector("#social-summary")?.textContent,cards:document.querySelectorAll("#social-items .hype-card").length,buttonDisabled:document.querySelector("#hype-refresh-button")?.disabled,refreshType:typeof window.refreshHype,evaluatorType:typeof window.evaluateAttentionRules,requests:${JSON.stringify(requests)},httpPaths:${JSON.stringify(httpPaths)},scripts:[...document.scripts].map(script=>({src:script.src,loaded:Boolean(script.isConnected)})),counts:${JSON.stringify(counts)},browserErrors:${JSON.stringify(browserErrors)}})`); throw new Error(`${error.message}; startup state ${JSON.stringify(debug)}`); }
   assert.equal(counts.social, 1, `coalesced social fetch count ${counts.social}; request order ${JSON.stringify(requests)}`);
   assert.equal(counts.trending, 1, `one CoinGecko request ${counts.trending}`);
   assert.ok(counts.dex > 0, "known address DEX calls were made");
@@ -129,6 +135,28 @@ try {
   assert.match(successView.summary, /Live CoinGecko and DEX values captured.*background capture/i);
   assert.match(successView.crawler, /momentum since background capture.*live values captured/i);
   assert.match(successView.crawler, /CoinGecko price \(live\)/i);
+  const primaryPairCheck = await evaluate(`(() => {
+    const item={coingecko_id:"primary-check",name:"Primary Check",symbol:"PRI",trending:{rank:1},market:{},identity:{contracts:[{chain:"ethereum",dex_status:"FRESH"},{chain:"solana",dex_status:"FRESH"}]},mentions:{},fomo_watch:{status:"UNKNOWN",observations:[]},dex_pairs:[
+      {coingecko_platform:"solana",dex_id:"sol-dex",pair_address:"sol-pair",liquidity_usd:100,price_change_by_period:{h24:4},age_seconds:10},
+      {coingecko_platform:"ethereum",dex_id:"eth-dex",pair_address:"eth-pair",liquidity_usd:900,price_change_by_period:{h24:8},age_seconds:20}
+    ]};
+    const first=window.primaryHypePair(item)?.pair_address;
+    item.dex_pairs.reverse();
+    const reversed=window.primaryHypePair(item)?.pair_address;
+    window.renderHype({captured_at_utc:new Date().toISOString(),items:[item]});
+    const card=document.querySelector("#social-items .hype-card"); card.open=true;
+    const primaryLabel=[...card.querySelectorAll(".metric span")].find(label=>label.textContent.startsWith("DEX primary pair"))?.textContent;
+    const select=card.querySelector(".pair-chain"); select.value="solana"; select.dispatchEvent(new Event("change"));
+    const solanaLabels=card.querySelector(".pair-results").textContent;
+    select.value="ethereum"; select.dispatchEvent(new Event("change"));
+    const ethereumLabels=card.querySelector(".pair-results").textContent;
+    return {first,reversed,primaryLabel,solanaLabels,ethereumLabels};
+  })()`);
+  assert.equal(primaryPairCheck.first, "eth-pair", JSON.stringify(primaryPairCheck));
+  assert.equal(primaryPairCheck.reversed, "eth-pair", JSON.stringify(primaryPairCheck));
+  assert.match(primaryPairCheck.primaryLabel, /eth-dex/, JSON.stringify(primaryPairCheck));
+  assert.doesNotMatch(primaryPairCheck.solanaLabels, /Primary pair/, JSON.stringify(primaryPairCheck));
+  assert.match(primaryPairCheck.ethereumLabels, /Primary pair \(highest known liquidity\)/, JSON.stringify(primaryPairCheck));
   const parityCases = ["crawlerpad", "pudgy-penguins"].map(id => ({current:firstCapture.items.find(item=>item.coingecko_id===id), prior:null}));
   const momentumCases = ["crawlerpad", "quantus", "bunker-mode", "identity-md-6900"].map(id => ({current:secondCapture.items.find(item=>item.coingecko_id===id), prior:firstCapture.items.find(item=>item.coingecko_id===id)}));
   const parityReplay = await evaluate(`(() => { const rules=${JSON.stringify(JSON.parse(rules.toString("utf8")))}; const observations=${JSON.stringify(parityCases)}.map(row=>({id:row.current.coingecko_id,result:window.evaluateAttentionRules(row.current,rules,row.prior)})); const momentum=${JSON.stringify(momentumCases)}.map(row=>({id:row.current.coingecko_id,state:window.evaluateAttentionRules(row.current,rules,row.prior).momentum.state})); const missing=window.calculateAttentionMomentum(null,null,null,null,rules,false); return {observations,momentum,missing}; })()`);
@@ -218,7 +246,7 @@ try {
   await send("Page.captureScreenshot", {format:"png", captureBeyondViewport:false}).then(result => fs.writeFileSync(path.join(OUT, "offline-cached-artifact.png"), Buffer.from(result.data,"base64")));
   serverOffline = false;
   await send("Network.emulateNetworkConditions", {offline:false, latency:0, downloadThroughput:-1, uploadThroughput:-1, connectionType:"none"});
-  const report = {browser:"Microsoft Edge headless CDP", viewport:"375x812 CSS px via Emulation.setDeviceMetricsOverride", success:successView, parityReplay, boundaryCases, offline, cooldown, newCoin, requestCounts:counts, requestOrder:requests, scenarios:["coalesced boot/visibility/button", "live merge", "new coin without address lookup", "attention-rule load failure fallback", "CoinGecko rate limit fallback", "DEX failure fallback", "Python/JavaScript shared-capture parity outcomes", "exact 100% DEX and +/-5% volume UI parity", "offline cached artifact startup with capture age"], screenshots:["success-live-merge.png","new-coin.png","rules-failure-fallback.png","cg-failure-fallback.png","dex-failure-fallback.png","offline-cached-artifact.png"]};
+  const report = {browser:"Microsoft Edge headless CDP", viewport:"375x812 CSS px via Emulation.setDeviceMetricsOverride", deploymentBasePath:"/crypto-hourly-desk/", primaryPairCheck, success:successView, parityReplay, boundaryCases, offline, cooldown, newCoin, requestCounts:counts, requestOrder:requests, scenarios:["coalesced boot/visibility/button", "live merge", "new coin without address lookup", "attention-rule load failure fallback", "CoinGecko rate limit fallback", "DEX failure fallback", "Python/JavaScript shared-capture parity outcomes", "exact 100% DEX and +/-5% volume UI parity", "global primary pair labels independent of pair order and selected chain", "offline cached artifact startup at /crypto-hourly-desk/ with capture age"], screenshots:["success-live-merge.png","new-coin.png","rules-failure-fallback.png","cg-failure-fallback.png","dex-failure-fallback.png","offline-cached-artifact.png"]};
   fs.writeFileSync(path.join(OUT, "results.json"), JSON.stringify(report,null,2));
   console.log(JSON.stringify(report,null,2));
 } catch (error) { runError = error; }

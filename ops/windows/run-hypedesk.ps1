@@ -13,6 +13,16 @@ $AllowedPaths = @('data/market-opportunities-hourly-latest.json', 'data/social-c
 $TaskName = 'MarketAttention-HypeDesk-Hourly'
 $ScriptRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 
+function Resolve-GitExecutable([object[]]$Candidates = $null) {
+    if ($null -eq $Candidates) { $Candidates = @(Get-Command git -CommandType Application -ErrorAction SilentlyContinue) }
+    if (-not $Candidates -or $Candidates.Count -eq 0) { throw 'PREFLIGHT_FAILED Git executable was not found.' }
+    $commands = @($Candidates | Where-Object { $_.Source })
+    if ($commands.Count -eq 0) { throw 'PREFLIGHT_FAILED Git executable was not found.' }
+    $preferred = @($commands | Where-Object { ([string]$_.Source) -match '(?i)\\cmd\\git\.exe$' } | Select-Object -First 1)
+    if ($preferred.Count -gt 0) { return [string]$preferred[0].Source }
+    return [string]$commands[0].Source
+}
+
 function Write-JobLog([string]$Message) {
     $stamp = [DateTime]::UtcNow.ToString('o')
     $line = "$stamp $Message"
@@ -31,7 +41,7 @@ function Write-JobLog([string]$Message) {
     if ($script:LogPath) { Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8 }
 }
 function Invoke-Git([string[]]$GitArgs) {
-    $result = & git -C $script:RepoPath @GitArgs 2>&1
+    $result = & $script:GitExe -C $script:RepoPath @GitArgs 2>&1
     $code = $LASTEXITCODE
     if ($code -ne 0) { throw "git $($GitArgs -join ' ') failed (exit $code); command output suppressed to protect credential-bearing remote configuration." }
     return @($result | ForEach-Object { [string]$_ })
@@ -112,13 +122,23 @@ function Save-Status([string]$State, [string]$Detail, [string]$RemoteRef = '') {
 }
 function Get-Head([string]$Ref) { return ((Invoke-Git @('rev-parse', $Ref)) -join '').Trim() }
 function Assert-ApprovedOrigin {
-    $origin = ((Invoke-Git @('remote', 'get-url', 'origin')) -join '').Trim()
+    $fetchUrls = @(Invoke-Git @('remote', 'get-url', '--all', 'origin') | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    $pushUrls = @(Invoke-Git @('remote', 'get-url', '--push', '--all', 'origin') | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    $configuredPushUrls = @(& $script:GitExe -C $script:RepoPath config --get-all remote.origin.pushurl 2>$null | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($LASTEXITCODE -gt 1) { throw 'PREFLIGHT_FAILED repository remote configuration could not be validated.' }
     if ($TestMode) {
-        try { $testOrigin = [IO.Path]::GetFullPath($origin) } catch { throw 'PREFLIGHT_FAILED disposable origin is invalid.' }
-        if (-not $testOrigin.StartsWith($expectedTestRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $testOrigin -PathType Container)) { throw 'PREFLIGHT_FAILED TestMode origin must be an existing disposable remote under repo/.test-tmp.' }
+        if ($fetchUrls.Count -eq 0 -or $pushUrls.Count -eq 0) { throw 'PREFLIGHT_FAILED TestMode fetch and push remotes must be configured.' }
+        foreach ($remoteUrl in @($fetchUrls) + @($pushUrls) + @($configuredPushUrls)) {
+            try { $testOrigin = [IO.Path]::GetFullPath($remoteUrl) } catch { throw 'PREFLIGHT_FAILED disposable remote is invalid.' }
+            if (-not $testOrigin.StartsWith($expectedTestRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $testOrigin -PathType Container)) { throw 'PREFLIGHT_FAILED TestMode fetch and push remotes must use the same disposable remote under repo/.test-tmp.' }
+        }
+        if (($fetchUrls | Select-Object -Unique).Count -ne 1 -or ($pushUrls | Select-Object -Unique).Count -ne 1 -or $fetchUrls[0] -ne $pushUrls[0]) { throw 'PREFLIGHT_FAILED TestMode fetch and push remotes must match.' }
         return
     }
-    if ($origin -notmatch '^https://github\.com/raydan01/crypto-hourly-desk(?:\.git)?$') { throw 'PREFLIGHT_FAILED repository origin does not match the approved Market Attention repository.' }
+    $approvedPattern = '^https://github\.com/raydan01/crypto-hourly-desk(?:\.git)?$'
+    if ($fetchUrls.Count -eq 0 -or $pushUrls.Count -eq 0 -or @($fetchUrls + $pushUrls | Where-Object { $_ -notmatch $approvedPattern }).Count -gt 0) { throw 'PREFLIGHT_FAILED repository fetch or push URL does not match the approved Market Attention repository.' }
+    if (@($configuredPushUrls | Where-Object { $_ -notmatch $approvedPattern }).Count -gt 0) { throw 'PREFLIGHT_FAILED configured push URL does not match the approved Market Attention repository.' }
+    if (($fetchUrls | Select-Object -Unique).Count -ne 1 -or ($pushUrls | Select-Object -Unique).Count -ne 1) { throw 'PREFLIGHT_FAILED repository must have one approved fetch URL and one approved push URL.' }
 }
 
 $resolvedRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
@@ -142,8 +162,8 @@ if ($TestMode) {
 }
 $script:RepoPath = Join-Path $resolvedRoot 'repo'
 if (-not (Test-Path -LiteralPath $script:RepoPath -PathType Container)) { throw "Dedicated clone is missing: $script:RepoPath" }
-$gitExe = (Get-Command git -CommandType Application -ErrorAction Stop).Source
-$gitRoot = (& $gitExe -C $script:RepoPath rev-parse --show-toplevel 2>$null)
+$script:GitExe = Resolve-GitExecutable
+$gitRoot = (& $script:GitExe -C $script:RepoPath rev-parse --show-toplevel 2>$null)
 if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath([string]$gitRoot).TrimEnd('\') -ne [IO.Path]::GetFullPath($script:RepoPath).TrimEnd('\')) { throw 'Refusing to run: the configured repo path is not the Git worktree root.' }
 if ($TestMode -and -not $script:RepoPath.StartsWith($expectedTestRoot + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Test clone escaped repo/.test-tmp.' }
 if (-not $TestMode -and $PythonPath -ne 'C:\CryptoScope\tools\python-3.14\python.exe') { throw 'Production interpreter path is fixed at C:\CryptoScope\tools\python-3.14\python.exe.' }
@@ -158,6 +178,9 @@ try {
     try { $lockStream = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
     catch [IO.IOException] { Write-JobLog 'SKIPPED_LOCKED another publisher run holds the exclusive lock'; Save-Status 'SKIPPED_LOCKED' 'Another run holds the local lock.'; return }
     Write-JobLog 'STARTED'
+    $gitVersion = & $script:GitExe --version 2>&1
+    if ($LASTEXITCODE -ne 0) { throw 'PREFLIGHT_FAILED Git version check failed.' }
+    Write-JobLog "GIT executable=$script:GitExe; version=$($gitVersion -join ' ')"
     if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) { throw "PREFLIGHT_FAILED fixed interpreter missing: $PythonPath" }
     $probe = & $PythonPath -c "import sys,json,urllib.request,xml.etree.ElementTree,ssl; print('CPython' if sys.implementation.name == 'cpython' else sys.implementation.name, sys.version_info[0], sys.version_info[1])" 2>&1
     if ($LASTEXITCODE -ne 0) { throw "PREFLIGHT_FAILED interpreter smoke import failed: $($probe -join ' ')" }
@@ -205,7 +228,7 @@ try {
     $published = $false
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         Assert-ApprovedOrigin
-        $pushOutput = & $gitExe -C $script:RepoPath push origin HEAD:main 2>&1
+        $pushOutput = & $script:GitExe -C $script:RepoPath push origin HEAD:main 2>&1
         $pushCode = $LASTEXITCODE
         if ($pushCode -eq 0) {
             Invoke-Git @('fetch', 'origin', 'main') | Out-Null

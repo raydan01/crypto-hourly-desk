@@ -6,14 +6,14 @@ self.addEventListener("fetch", event => {
   if (event.request.method !== "GET") return;
   event.respondWith(fetch(event.request).catch(() => {
     const url = new URL(event.request.url);
-    const artifactPaths = new Set([
-      "/data/market-opportunities-hourly-latest.json",
-      "/data/market-opportunities-daily-latest.json",
-      "/data/market-opportunities-long-term-latest.json",
-      "/data/social-context-v2-latest.json",
-      "/data/attention-rules.json"
-    ]);
-    const sameOriginArtifact = url.origin === self.location.origin && artifactPaths.has(url.pathname);
+    const artifactPaths = [
+      "data/market-opportunities-hourly-latest.json",
+      "data/market-opportunities-daily-latest.json",
+      "data/market-opportunities-long-term-latest.json",
+      "data/social-context-v2-latest.json",
+      "data/attention-rules.json"
+    ].map(path => new URL(path, self.registration.scope).pathname);
+    const sameOriginArtifact = url.origin === self.location.origin && artifactPaths.includes(url.pathname);
     return caches.match(event.request, sameOriginArtifact ? {ignoreSearch: true} : undefined);
   }));
 });

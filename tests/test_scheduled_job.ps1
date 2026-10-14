@@ -16,7 +16,7 @@ $uninstaller = Join-Path $repo 'ops\windows\uninstall-hypedesk.ps1'
 $python = 'C:\CryptoScope\tools\python-3.14\python.exe'
 function Assert([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
 function Invoke-HdGit([string]$At, [string[]]$Args) {
-    $gitExe = (Get-Command git -CommandType Application -ErrorAction Stop).Source
+    $gitExe = Resolve-GitExecutable
     $out = & $gitExe -c "safe.directory=$At" -C $At @Args 2>&1
     if ($LASTEXITCODE -ne 0) { throw "git $($Args -join ' ') failed: $($out -join ' ')" }
     return @($out | ForEach-Object { [string]$_ })
@@ -28,7 +28,17 @@ if (Test-Path -LiteralPath $testRoot) {
 }
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 try {
-$gitExe = (Get-Command git -CommandType Application -ErrorAction Stop).Source
+$runnerTokens = $null; $runnerParseErrors = $null
+$runnerAst = [System.Management.Automation.Language.Parser]::ParseFile($runner, [ref]$runnerTokens, [ref]$runnerParseErrors)
+$resolverAst = $runnerAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Resolve-GitExecutable' }, $true)
+Assert ($null -ne $resolverAst) 'Runner does not define Git executable resolution.'
+Invoke-Expression $resolverAst.Extent.Text
+$simulatedCommands = @(
+    [pscustomobject]@{Source='C:\Users\rayda\AppData\Local\hermes\git\bin\git.exe'},
+    [pscustomobject]@{Source='C:\Users\rayda\AppData\Local\hermes\git\cmd\git.exe'}
+)
+Assert ((Resolve-GitExecutable $simulatedCommands) -eq 'C:\Users\rayda\AppData\Local\hermes\git\cmd\git.exe') 'Git resolver did not prefer cmd\git.exe when multiple applications were returned.'
+$gitExe = Resolve-GitExecutable
 $archiveEntries = Get-ChildItem -LiteralPath $repo -Force | Where-Object { $_.Name -notin @('.git', '.test-tmp') }
 New-Item -ItemType Directory -Force -Path $sourceRepo | Out-Null
 foreach ($entry in $archiveEntries) { Copy-Item -LiteralPath $entry.FullName -Destination $sourceRepo -Recurse -Force }
@@ -88,6 +98,8 @@ if ($LASTEXITCODE -ne 0) { exit 1 }
     Invoke-HdGit $clone @('add', 'ops/windows/install-hypedesk.ps1', 'ops/windows/uninstall-hypedesk.ps1', 'ops/windows/run-hypedesk.ps1') | Out-Null
     Invoke-HdGit $clone @('commit', '-m', 'Seed disposable publisher test') | Out-Null
     Invoke-HdGit $clone @('push', 'origin', 'main') | Out-Null
+    & $gitExe --git-dir=$bare symbolic-ref HEAD refs/heads/main 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not set disposable bare remote HEAD to main.' }
     & $gitExe clone $bare $raceClone 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Could not create race simulator clone.' }
     Invoke-HdGit $raceClone @('config', 'user.name', 'Race fixture') | Out-Null
@@ -109,10 +121,19 @@ if ($LASTEXITCODE -ne 0) { exit 1 }
     Assert (@($inventory | Where-Object TaskName -eq 'Unrelated-Test-Task').Count -eq 1) 'Installer did not preserve the unrelated mocked task.'
     Assert (@($inventory | Where-Object TaskName -eq 'MarketAttention-HypeDesk-Hourly').Count -eq 1) 'Installer did not register exactly its mocked task.'
 
+    Invoke-HdGit $clone @('remote', 'set-url', '--push', 'origin', 'https://github.com/attacker/not-market-attention.git') | Out-Null
+    $wrongPushUrlInstall = & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -InstallRoot $installRoot -TestMode 2>&1
+    Assert ($LASTEXITCODE -ne 0) 'Installer accepted a push URL that differs from the approved fetch URL.'
+    Invoke-HdGit $clone @('remote', 'set-url', '--push', 'origin', $bare) | Out-Null
+
     Invoke-HdGit $clone @('remote', 'set-url', 'origin', 'https://github.com/attacker/not-market-attention.git') | Out-Null
     $wrongOriginRun = & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner -InstallRoot $installRoot -TestMode -DryRun -PythonPath $python -TestRefreshScript $fixture 2>&1
     Assert ($LASTEXITCODE -ne 0) 'Runner accepted an origin outside the disposable test root.'
     Invoke-HdGit $clone @('remote', 'set-url', 'origin', $bare) | Out-Null
+    Invoke-HdGit $clone @('remote', 'set-url', '--push', 'origin', 'https://github.com/attacker/not-market-attention.git') | Out-Null
+    $wrongPushUrlRun = & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner -InstallRoot $installRoot -TestMode -DryRun -PythonPath $python -TestRefreshScript $fixture 2>&1
+    Assert ($LASTEXITCODE -ne 0) 'Runner accepted a push URL that differs from the approved fetch URL.'
+    Invoke-HdGit $clone @('remote', 'set-url', '--push', 'origin', $bare) | Out-Null
     $runOutput = & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner -InstallRoot $installRoot -TestMode -DryRun -PythonPath $python -TestRefreshScript $fixture 2>&1
     Assert ($LASTEXITCODE -eq 0) "Scheduled dry run failed: $($runOutput -join ' ')"
     Assert (($runOutput -join "`n") -match 'remote unchanged;') 'Dry run did not explicitly report the remote unchanged.'
