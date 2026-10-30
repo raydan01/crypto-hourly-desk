@@ -4,24 +4,32 @@ on:
   schedule:
     - cron: "31 0 * * *"
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/refresh-daily.yml
+      - scripts/publish-daily-snapshot.sh
 
 permissions:
   contents: write
+
+concurrency:
+  group: refresh-daily-main
+  cancel-in-progress: false
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Refresh Kraken public daily snapshot
         run: python refresh_daily.py
-      - name: Commit changed snapshot
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/market-opportunities-daily-latest.json data/market-opportunities-long-term-latest.json
-          git diff --cached --quiet || git commit -m "Refresh weekly trading snapshot"
-          git push
+      - name: Publish daily snapshots without overwriting concurrent updates
+        shell: bash
+        run: bash scripts/publish-daily-snapshot.sh
